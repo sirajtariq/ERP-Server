@@ -1,0 +1,11 @@
+[project]
+name = "erp-backend"
+version = "0.1.0"
+description = "Desktop ERP REST API — Sales and Purchase modules (Django + DRF)"
+requires-python = ">=3.13"
+dependencies = [
+    "django>=6.0.6",
+    "django-cors-headers>=4.9.0",
+    "djangorestframework>=3.17.1",
+    "drf-yasg>=1.21.15",
+]
