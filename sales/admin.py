@@ -18,13 +18,13 @@ class CustomerAdmin(admin.ModelAdmin):
 
 @admin.register(SalesInvoice)
 class SalesInvoiceAdmin(admin.ModelAdmin):
-    list_display = ("invoice_number", "customer", "date", "total_amount")
-    list_filter = ("date", "customer")
-    search_fields = ("invoice_number", "customer__customer_name")
+    list_display = ("invoice_number", "customer", "walk_in_customer_name", "payment_term", "payment_method", "date", "net_total", "status")
+    list_filter = ("date", "payment_term", "status", "customer")
+    search_fields = ("invoice_number", "customer__customer_name", "walk_in_customer_name")
     inlines = [SalesItemInline]
 
 
 @admin.register(SalesItem)
 class SalesItemAdmin(admin.ModelAdmin):
-    list_display = ("product_name", "invoice", "quantity", "sale_price")
+    list_display = ("item_name", "invoice", "quantity", "rate", "total")
     list_filter = ("invoice",)

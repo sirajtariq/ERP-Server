@@ -11,7 +11,7 @@ class UserSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = User
-        fields = ['id', 'username', 'password', 'role']
+        fields = ['id', 'username', 'email', 'password', 'role']
         extra_kwargs = {
             'password': {'write_only': True}
         }
@@ -25,3 +25,29 @@ class UserSerializer(serializers.ModelSerializer):
         except Group.DoesNotExist:
             pass
         return user
+
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
+
+class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
+    @classmethod
+    def get_token(cls, user):
+        token = super().get_token(user)
+
+        # Add custom claims
+        token['username'] = user.username
+        
+        # Determine roles
+        roles = []
+        if user.is_superuser:
+            roles.append('Superuser')
+        # Add group names
+        roles.extend(list(user.groups.values_list('name', flat=True)))
+        
+        token['roles'] = roles
+        return token
+
+class PasswordChangeSerializer(serializers.Serializer):
+    user_id = serializers.IntegerField(required=False, help_text="ID of the user. If empty, changes own password.")
+    old_password = serializers.CharField(required=False, allow_blank=True, help_text="Required for non-superusers/non-admins, or when changing own password.")
+    new_password = serializers.CharField(required=True)
+
