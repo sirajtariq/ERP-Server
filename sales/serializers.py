@@ -14,11 +14,18 @@ from sales.models import Customer, SalesInvoice, SalesItem
 
 class CustomerSerializer(serializers.ModelSerializer):
     """Serializer for customer master data."""
+    
+    customerId = serializers.IntegerField(source="customer_id", read_only=True)
+    customerName = serializers.CharField(source="customer_name")
+    Phone = serializers.CharField(source="phone")
+    Address = serializers.CharField(source="address")
+    openingCredit = serializers.DecimalField(source="opening_credit", max_digits=12, decimal_places=2, required=False, allow_null=True)
+    openingNote = serializers.CharField(source="opening_note", required=False, allow_blank=True)
 
     class Meta:
         model = Customer
-        fields = ["id", "name", "phone"]
-        read_only_fields = ["id"]
+        fields = ["id", "customerId", "customerName", "Phone", "email", "Address", "openingCredit", "openingNote"]
+        read_only_fields = ["id", "customerId"]
 
 
 class SalesItemSerializer(serializers.ModelSerializer):

@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  backend:
+    build: .
+    container_name: erp_backend_app
+    ports:
+      - "8000:8000"
+    volumes:
+      # Local folder ko container ke sath map karna taake SQLite file local machine par save rahe
+      - .:/app
+    environment:
+      - DEBUG=True
+    # Yeh command har restart par automatic migrations chalaye gi
+    command: >
+      sh -c "uv run python manage.py makemigrations &&
+             uv run python manage.py migrate &&
+             uv run python manage.py runserver 0.0.0.0:8000"
