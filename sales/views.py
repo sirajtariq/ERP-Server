@@ -25,6 +25,7 @@ class CustomerViewSet(viewsets.ModelViewSet):
     queryset = Customer.objects.all()
     serializer_class = CustomerSerializer
     permission_classes = [IsSalesUser]
+    lookup_field = "customer_id"
 
     @swagger_auto_schema(operation_description=SALES_PERMISSION_NOTE)
     def list(self, request, *args, **kwargs):

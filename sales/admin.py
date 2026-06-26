@@ -12,15 +12,15 @@ class SalesItemInline(admin.TabularInline):
 
 @admin.register(Customer)
 class CustomerAdmin(admin.ModelAdmin):
-    list_display = ("name", "phone")
-    search_fields = ("name", "phone")
+    list_display = ("customer_id", "customer_name", "phone")
+    search_fields = ("customer_name", "phone", "customer_id")
 
 
 @admin.register(SalesInvoice)
 class SalesInvoiceAdmin(admin.ModelAdmin):
     list_display = ("invoice_number", "customer", "date", "total_amount")
     list_filter = ("date", "customer")
-    search_fields = ("invoice_number", "customer__name")
+    search_fields = ("invoice_number", "customer__customer_name")
     inlines = [SalesItemInline]
 
 

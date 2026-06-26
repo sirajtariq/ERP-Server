@@ -8,14 +8,28 @@ from django.db import models
 class Customer(models.Model):
     """Customer master record."""
 
-    name = models.CharField(max_length=255)
-    phone = models.CharField(max_length=20, blank=True)
+    customer_id = models.IntegerField(unique=True, editable=False, default=4000)
+    customer_name = models.CharField(max_length=255)
+    phone = models.CharField(max_length=20, unique=True)
+    email = models.EmailField(blank=True, null=True)
+    address = models.TextField(default="")
+    opening_credit = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    opening_note = models.TextField(blank=True)
 
     class Meta:
-        ordering = ["name"]
+        ordering = ["customer_name"]
 
     def __str__(self) -> str:
-        return self.name
+        return self.customer_name
+
+    def save(self, *args, **kwargs):
+        if not self.id:
+            last_customer = Customer.objects.order_by('-customer_id').first()
+            if last_customer and last_customer.customer_id >= 4000:
+                self.customer_id = last_customer.customer_id + 1
+            else:
+                self.customer_id = 4000
+        super().save(*args, **kwargs)
 
 
 class SalesInvoice(models.Model):
