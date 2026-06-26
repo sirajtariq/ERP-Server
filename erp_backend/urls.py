@@ -14,8 +14,9 @@ from drf_yasg import openapi
 from drf_yasg.views import get_schema_view
 from rest_framework import permissions
 from rest_framework.routers import DefaultRouter
+from rest_framework_simplejwt.views import TokenRefreshView, TokenBlacklistView
 
-from erp_backend.views import UserViewSet
+from erp_backend.views import UserViewSet, CustomTokenObtainPairView, PasswordChangeAPIView
 
 router = DefaultRouter()
 router.register(r"users", UserViewSet, basename="user")
@@ -53,6 +54,11 @@ schema_view = get_schema_view(
 
 urlpatterns = [
     path("admin/", admin.site.urls),
+    # Auth APIs
+    path("api/auth/login/", CustomTokenObtainPairView.as_view(), name="token_obtain_pair"),
+    path("api/auth/login/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
+    path("api/auth/logout/", TokenBlacklistView.as_view(), name="token_blacklist"),
+    path("api/auth/password/change/", PasswordChangeAPIView.as_view(), name="password_change"),
     # Core APIs
     path("api/", include(router.urls)),
     # Module APIs

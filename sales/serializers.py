@@ -22,66 +22,84 @@ class CustomerSerializer(serializers.ModelSerializer):
     openingCredit = serializers.DecimalField(source="opening_credit", max_digits=12, decimal_places=2, required=False, allow_null=True)
     openingNote = serializers.CharField(source="opening_note", required=False, allow_blank=True)
 
+    taxNumber = serializers.CharField(source="tax_number", required=False, allow_null=True)
+    creditBalance = serializers.DecimalField(source="credit_balance", max_digits=12, decimal_places=2, read_only=True)
+    advanceBalance = serializers.DecimalField(source="advance_balance", max_digits=12, decimal_places=2, read_only=True)
+
     class Meta:
         model = Customer
-        fields = ["id", "customerId", "customerName", "Phone", "email", "Address", "openingCredit", "openingNote"]
-        read_only_fields = ["id", "customerId"]
+        fields = ["id", "customerId", "customerName", "Phone", "email", "Address", "openingCredit", "openingNote", "taxNumber", "creditBalance", "advanceBalance"]
+        read_only_fields = ["id", "customerId", "creditBalance", "advanceBalance"]
 
 
 class SalesItemSerializer(serializers.ModelSerializer):
     """Serializer for standalone sales invoice line items."""
+    total = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
 
     class Meta:
         model = SalesItem
-        fields = ["id", "invoice", "product_name", "quantity", "sale_price"]
-        read_only_fields = ["id"]
+        fields = ["id", "invoice", "item_name", "units", "quantity", "rate", "discount", "total"]
+        read_only_fields = ["id", "total"]
 
 
 class SalesItemNestedSerializer(serializers.ModelSerializer):
     """Nested line item serializer (invoice is set by the parent invoice)."""
+    total = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
 
     class Meta:
         model = SalesItem
-        fields = ["id", "product_name", "quantity", "sale_price"]
-        read_only_fields = ["id"]
+        fields = ["id", "item_name", "units", "quantity", "rate", "discount", "total"]
+        read_only_fields = ["id", "total"]
 
 
 class SalesInvoiceSerializer(serializers.ModelSerializer):
-    """
-    Invoice serializer with nested items.
-
-    On create/update, nested ``items`` are persisted atomically. If
-    ``total_amount`` is omitted, it is calculated from line item totals.
-    """
-
     items = SalesItemNestedSerializer(many=True)
-    customer_name = serializers.CharField(source="customer.name", read_only=True)
+    customer_data = CustomerSerializer(source='customer', read_only=True)
+    
+    subtotal = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    total_line_discount = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    tax_amount = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    net_total = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    balance_due = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
 
     class Meta:
         model = SalesInvoice
         fields = [
             "id",
-            "customer",
-            "customer_name",
             "invoice_number",
             "date",
-            "total_amount",
+            "customer",
+            "customer_data",
+            "walk_in_customer_name",
+            "payment_term",
+            "payment_method",
+            "paid_amount",
+            "payment_reference",
+            "notes",
+            "vat_percentage",
+            "invoice_discount",
+            "status",
             "items",
+            "subtotal",
+            "total_line_discount",
+            "tax_amount",
+            "net_total",
+            "balance_due",
         ]
-        read_only_fields = ["id", "customer_name"]
-
-    def _calculate_total(self, items_data: list[dict]) -> Decimal:
-        """Sum quantity * sale_price for all line items."""
-        return sum(
-            (Decimal(item["quantity"]) * item["sale_price"] for item in items_data),
-            Decimal("0.00"),
-        )
+        read_only_fields = [
+            "id", 
+            "invoice_number", 
+            "date", 
+            "customer_data", 
+            "subtotal", 
+            "total_line_discount", 
+            "tax_amount", 
+            "net_total", 
+            "balance_due"
+        ]
 
     def create(self, validated_data: dict) -> SalesInvoice:
         items_data = validated_data.pop("items")
-        if "total_amount" not in validated_data:
-            validated_data["total_amount"] = self._calculate_total(items_data)
-
         invoice = SalesInvoice.objects.create(**validated_data)
         for item_data in items_data:
             SalesItem.objects.create(invoice=invoice, **item_data)
@@ -89,16 +107,11 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
 
     def update(self, instance: SalesInvoice, validated_data: dict) -> SalesInvoice:
         items_data = validated_data.pop("items", None)
-
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
-
+        instance.save()
         if items_data is not None:
             instance.items.all().delete()
             for item_data in items_data:
                 SalesItem.objects.create(invoice=instance, **item_data)
-            if "total_amount" not in validated_data:
-                instance.total_amount = self._calculate_total(items_data)
-
-        instance.save()
         return instance

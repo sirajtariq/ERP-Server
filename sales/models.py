@@ -2,6 +2,7 @@
 Sales module data models: customers, invoices, and line items.
 """
 
+from decimal import Decimal
 from django.db import models
 
 
@@ -15,6 +16,9 @@ class Customer(models.Model):
     address = models.TextField(default="")
     opening_credit = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     opening_note = models.TextField(blank=True)
+    tax_number = models.CharField(max_length=50, blank=True, null=True)
+    credit_balance = models.DecimalField(max_digits=12, decimal_places=2, default=0.0)
+    advance_balance = models.DecimalField(max_digits=12, decimal_places=2, default=0.0)
 
     class Meta:
         ordering = ["customer_name"]
@@ -39,16 +43,71 @@ class SalesInvoice(models.Model):
         Customer,
         on_delete=models.PROTECT,
         related_name="invoices",
+        null=True,
+        blank=True,
     )
-    invoice_number = models.CharField(max_length=50, unique=True)
-    date = models.DateField()
-    total_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    walk_in_customer_name = models.CharField(max_length=255, blank=True, null=True)
+    
+    PAYMENT_TERM_CHOICES = (
+        ('Cash', 'Cash'),
+        ('Credit', 'Credit'),
+    )
+    payment_term = models.CharField(max_length=10, choices=PAYMENT_TERM_CHOICES, default='Credit')
+    payment_method = models.CharField(max_length=50, blank=True, null=True)
+    paid_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0.0)
+    payment_reference = models.CharField(max_length=255, blank=True, null=True)
+    notes = models.TextField(blank=True, null=True)
+    vat_percentage = models.DecimalField(max_digits=5, decimal_places=2, default=0.0)
+    invoice_discount = models.DecimalField(max_digits=12, decimal_places=2, default=0.0)
+    
+    STATUS_CHOICES = (
+        ('Draft', 'Draft'),
+        ('Saved', 'Saved'),
+    )
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='Draft')
+    
+    invoice_number = models.CharField(max_length=50, unique=True, blank=True)
+    date = models.DateField(auto_now_add=True)
 
     class Meta:
         ordering = ["-date", "-id"]
 
+    @property
+    def subtotal(self):
+        return sum((item.total for item in self.items.all()), Decimal('0.00'))
+
+    @property
+    def total_line_discount(self):
+        return sum((item.discount for item in self.items.all()), Decimal('0.00'))
+
+    @property
+    def tax_amount(self):
+        return (self.subtotal - Decimal(str(self.invoice_discount))) * (Decimal(str(self.vat_percentage)) / Decimal('100'))
+
+    @property
+    def net_total(self):
+        return (self.subtotal - Decimal(str(self.invoice_discount))) + self.tax_amount
+
+    @property
+    def balance_due(self):
+        return self.net_total - Decimal(str(self.paid_amount))
+
+    def save(self, *args, **kwargs):
+        if not self.invoice_number:
+            from datetime import date
+            current_year = date.today().year
+            last_invoice = SalesInvoice.objects.filter(invoice_number__startswith=f'INV-{current_year}-').order_by('-id').first()
+            if last_invoice:
+                last_number = int(last_invoice.invoice_number.split('-')[-1])
+                new_number = last_number + 1
+            else:
+                new_number = 1
+            self.invoice_number = f'INV-{current_year}-{new_number:05d}'
+        super().save(*args, **kwargs)
+
     def __str__(self) -> str:
-        return f"{self.invoice_number} ({self.customer.name})"
+        name = self.customer.customer_name if self.customer else (self.walk_in_customer_name or "Walk-in")
+        return f"{self.invoice_number} ({name})"
 
 
 class SalesItem(models.Model):
@@ -59,12 +118,18 @@ class SalesItem(models.Model):
         on_delete=models.CASCADE,
         related_name="items",
     )
-    product_name = models.CharField(max_length=255)
-    quantity = models.PositiveIntegerField()
-    sale_price = models.DecimalField(max_digits=12, decimal_places=2)
+    item_name = models.CharField(max_length=255)
+    units = models.CharField(max_length=50, default='pcs')
+    quantity = models.DecimalField(max_digits=10, decimal_places=2)
+    rate = models.DecimalField(max_digits=12, decimal_places=2)
+    discount = models.DecimalField(max_digits=12, decimal_places=2, default=0.0)
 
     class Meta:
         ordering = ["id"]
 
+    @property
+    def total(self):
+        return (self.quantity * self.rate) - self.discount
+
     def __str__(self) -> str:
-        return f"{self.product_name} x{self.quantity}"
+        return f"{self.item_name} x{self.quantity}"
