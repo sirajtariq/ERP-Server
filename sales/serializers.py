@@ -12,8 +12,30 @@ from rest_framework import serializers
 from sales.models import Customer, SalesInvoice, SalesItem
 
 
+class CustomerInvoiceNestedSerializer(serializers.ModelSerializer):
+    """Lightweight invoice serializer nested inside Customer responses."""
+
+    subtotal = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    net_total = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    balance_due = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+
+    class Meta:
+        model = SalesInvoice
+        fields = [
+            "id",
+            "invoice_number",
+            "date",
+            "payment_term",
+            "status",
+            "subtotal",
+            "net_total",
+            "balance_due",
+        ]
+        read_only_fields = fields
+
+
 class CustomerSerializer(serializers.ModelSerializer):
-    """Serializer for customer master data."""
+    """Serializer for customer master data with nested invoices."""
     
     customerId = serializers.IntegerField(source="customer_id", read_only=True)
     customerName = serializers.CharField(source="customer_name")
@@ -25,11 +47,14 @@ class CustomerSerializer(serializers.ModelSerializer):
     taxNumber = serializers.CharField(source="tax_number", required=False, allow_null=True)
     creditBalance = serializers.DecimalField(source="credit_balance", max_digits=12, decimal_places=2, read_only=True)
     advanceBalance = serializers.DecimalField(source="advance_balance", max_digits=12, decimal_places=2, read_only=True)
+    createdAt = serializers.DateTimeField(source="created_at", read_only=True)
+    updatedAt = serializers.DateTimeField(source="updated_at", read_only=True)
+    invoices = CustomerInvoiceNestedSerializer(many=True, read_only=True)
 
     class Meta:
         model = Customer
-        fields = ["id", "customerId", "customerName", "Phone", "email", "Address", "openingCredit", "openingNote", "taxNumber", "creditBalance", "advanceBalance"]
-        read_only_fields = ["id", "customerId", "creditBalance", "advanceBalance"]
+        fields = ["id", "customerId", "customerName", "Phone", "email", "Address", "openingCredit", "openingNote", "taxNumber", "creditBalance", "advanceBalance", "createdAt", "updatedAt", "invoices"]
+        read_only_fields = ["id", "customerId", "creditBalance", "advanceBalance", "createdAt", "updatedAt", "invoices"]
 
 
 class SalesItemSerializer(serializers.ModelSerializer):

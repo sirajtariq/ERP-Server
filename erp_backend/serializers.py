@@ -28,6 +28,15 @@ class UserSerializer(serializers.ModelSerializer):
 
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
+# Mapping from Django group names / superuser flag to API role constants
+ROLE_MAP = {
+    "superuser": "SUPER_ADMIN",
+    "Admin": "ADMIN",
+    "Sales": "SALE_PERSON",
+    "Purchase": "PURCHASE_PERSON",
+}
+
+
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
     @classmethod
     def get_token(cls, user):
@@ -35,16 +44,41 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
 
         # Add custom claims
         token['username'] = user.username
-        
-        # Determine roles
-        roles = []
-        if user.is_superuser:
-            roles.append('Superuser')
-        # Add group names
-        roles.extend(list(user.groups.values_list('name', flat=True)))
-        
-        token['roles'] = roles
+
+        # Determine role using the uppercase mapping
+        role = cls._resolve_role(user)
+        token['role'] = role
         return token
+
+    @classmethod
+    def _resolve_role(cls, user):
+        """
+        Return the single primary role for a user using uppercase constants.
+
+        Priority: SUPER_ADMIN > ADMIN > SALE_PERSON > PURCHASE_PERSON
+        """
+        if user.is_superuser:
+            return ROLE_MAP["superuser"]
+
+        group_names = set(user.groups.values_list("name", flat=True))
+
+        if "Admin" in group_names:
+            return ROLE_MAP["Admin"]
+        if "Sales" in group_names:
+            return ROLE_MAP["Sales"]
+        if "Purchase" in group_names:
+            return ROLE_MAP["Purchase"]
+
+        return "UNKNOWN"
+
+    def validate(self, attrs):
+        data = super().validate(attrs)
+
+        # Add role to the response body alongside access/refresh tokens
+        data["role"] = self._resolve_role(self.user)
+        data["username"] = self.user.username
+
+        return data
 
 class PasswordChangeSerializer(serializers.Serializer):
     user_id = serializers.IntegerField(required=False, help_text="ID of the user. If empty, changes own password.")

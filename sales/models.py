@@ -19,9 +19,11 @@ class Customer(models.Model):
     tax_number = models.CharField(max_length=50, blank=True, null=True)
     credit_balance = models.DecimalField(max_digits=12, decimal_places=2, default=0.0)
     advance_balance = models.DecimalField(max_digits=12, decimal_places=2, default=0.0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        ordering = ["customer_name"]
+        ordering = ["-created_at"]
 
     def __str__(self) -> str:
         return self.customer_name
