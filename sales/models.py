@@ -4,6 +4,7 @@ Sales module data models: customers, invoices, and line items.
 
 from decimal import Decimal
 from django.db import models
+from django.db import transaction
 
 
 class Customer(models.Model):
@@ -19,20 +20,21 @@ class Customer(models.Model):
     tax_number = models.CharField(max_length=50, blank=True, null=True)
     credit_balance = models.DecimalField(max_digits=12, decimal_places=2, default=0.0)
     advance_balance = models.DecimalField(max_digits=12, decimal_places=2, default=0.0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        ordering = ["customer_name"]
+        ordering = ["-created_at"]
 
     def __str__(self) -> str:
         return self.customer_name
 
     def save(self, *args, **kwargs):
         if not self.id:
-            last_customer = Customer.objects.order_by('-customer_id').first()
-            if last_customer and last_customer.customer_id >= 4000:
-                self.customer_id = last_customer.customer_id + 1
-            else:
-                self.customer_id = 4000
+            with transaction.atomic():
+                last = Customer.objects.select_for_update()\
+                               .order_by('-customer_id').first()
+                self.customer_id = (last.customer_id + 1) if last else 4000
         super().save(*args, **kwargs)
 
 

@@ -12,8 +12,30 @@ from rest_framework import serializers
 from sales.models import Customer, SalesInvoice, SalesItem
 
 
+class CustomerInvoiceNestedSerializer(serializers.ModelSerializer):
+    """Lightweight invoice serializer nested inside Customer responses."""
+
+    subtotal = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    net_total = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    balance_due = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+
+    class Meta:
+        model = SalesInvoice
+        fields = [
+            "id",
+            "invoice_number",
+            "date",
+            "payment_term",
+            "status",
+            "subtotal",
+            "net_total",
+            "balance_due",
+        ]
+        read_only_fields = fields
+
+
 class CustomerSerializer(serializers.ModelSerializer):
-    """Serializer for customer master data."""
+    """Serializer for customer master data with nested invoices."""
     
     customerId = serializers.IntegerField(source="customer_id", read_only=True)
     customerName = serializers.CharField(source="customer_name")
@@ -25,11 +47,14 @@ class CustomerSerializer(serializers.ModelSerializer):
     taxNumber = serializers.CharField(source="tax_number", required=False, allow_null=True)
     creditBalance = serializers.DecimalField(source="credit_balance", max_digits=12, decimal_places=2, read_only=True)
     advanceBalance = serializers.DecimalField(source="advance_balance", max_digits=12, decimal_places=2, read_only=True)
+    createdAt = serializers.DateTimeField(source="created_at", read_only=True)
+    updatedAt = serializers.DateTimeField(source="updated_at", read_only=True)
+    invoices = CustomerInvoiceNestedSerializer(many=True, read_only=True)
 
     class Meta:
         model = Customer
-        fields = ["id", "customerId", "customerName", "Phone", "email", "Address", "openingCredit", "openingNote", "taxNumber", "creditBalance", "advanceBalance"]
-        read_only_fields = ["id", "customerId", "creditBalance", "advanceBalance"]
+        fields = ["id", "customerId", "customerName", "Phone", "email", "Address", "openingCredit", "openingNote", "taxNumber", "creditBalance", "advanceBalance", "createdAt", "updatedAt", "invoices"]
+        read_only_fields = ["id", "customerId", "creditBalance", "advanceBalance", "createdAt", "updatedAt", "invoices"]
 
 
 class SalesItemSerializer(serializers.ModelSerializer):
@@ -98,11 +123,35 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             "balance_due"
         ]
 
+    def validate(self, attrs):
+        customer = attrs.get('customer')
+        payment_term = attrs.get('payment_term')
+        walk_in_name = attrs.get('walk_in_customer_name')
+
+        if not customer and payment_term == 'Credit':
+            raise serializers.ValidationError(
+                "Walk-in customers can only pay via Cash."
+            )
+        if not customer and not walk_in_name:
+            raise serializers.ValidationError(
+                "Either a customer or walk-in name is required."
+            )
+        if customer and walk_in_name:
+            raise serializers.ValidationError(
+                "Provide either a customer or walk-in name, not both."
+            )
+        return attrs
+
     def create(self, validated_data: dict) -> SalesInvoice:
         items_data = validated_data.pop("items")
         invoice = SalesInvoice.objects.create(**validated_data)
         for item_data in items_data:
             SalesItem.objects.create(invoice=invoice, **item_data)
+
+        if invoice.customer and invoice.payment_term == 'Credit':
+            invoice.customer.credit_balance += invoice.balance_due
+            invoice.customer.save(update_fields=['credit_balance'])
+
         return invoice
 
     def update(self, instance: SalesInvoice, validated_data: dict) -> SalesInvoice:

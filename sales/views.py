@@ -2,11 +2,14 @@
 Sales module API viewsets with RBAC enforcement.
 """
 
+from drf_yasg import openapi
 from drf_yasg.utils import swagger_auto_schema
 from rest_framework import viewsets
+from rest_framework.filters import OrderingFilter
 
 from erp_backend.permissions import IsSalesUser
 from sales.models import Customer, SalesInvoice, SalesItem
+from sales.pagination import CustomPageNumberPagination
 from sales.serializers import (
     CustomerSerializer,
     SalesInvoiceSerializer,
@@ -22,12 +25,48 @@ SALES_PERMISSION_NOTE = (
 class CustomerViewSet(viewsets.ModelViewSet):
     """CRUD operations for customers."""
 
-    queryset = Customer.objects.all()
+    queryset = Customer.objects.prefetch_related("invoices").all()
     serializer_class = CustomerSerializer
     permission_classes = [IsSalesUser]
     lookup_field = "customer_id"
+    pagination_class = CustomPageNumberPagination
+    filter_backends = [OrderingFilter]
+    ordering_fields = "__all__"
+    ordering = ["-created_at"]
 
-    @swagger_auto_schema(operation_description=SALES_PERMISSION_NOTE)
+    def get_queryset(self):
+        qs = super().get_queryset()
+        name = self.request.query_params.get("name")
+        if name:
+            qs = qs.filter(customer_name__icontains=name)
+        return qs
+
+    @swagger_auto_schema(
+        operation_description=SALES_PERMISSION_NOTE,
+        manual_parameters=[
+            openapi.Parameter(
+                "name", openapi.IN_QUERY,
+                description="Search customers by name (case-insensitive, partial match)",
+                type=openapi.TYPE_STRING,
+            ),
+            openapi.Parameter(
+                "page", openapi.IN_QUERY,
+                description="Page number (default: 1)",
+                type=openapi.TYPE_INTEGER,
+            ),
+            openapi.Parameter(
+                "page_size", openapi.IN_QUERY,
+                description="Results per page (default: 10, max: 100)",
+                type=openapi.TYPE_INTEGER,
+            ),
+            openapi.Parameter(
+                "ordering", openapi.IN_QUERY,
+                description="Sort field. Prefix with '-' for descending. "
+                            "E.g. 'customer_name', '-created_at', 'credit_balance'",
+                type=openapi.TYPE_STRING,
+            ),
+        ],
+    )
     def list(self, request, *args, **kwargs):
         return super().list(request, *args, **kwargs)
 
@@ -64,8 +103,49 @@ class SalesInvoiceViewSet(viewsets.ModelViewSet):
     )
     serializer_class = SalesInvoiceSerializer
     permission_classes = [IsSalesUser]
+    pagination_class = CustomPageNumberPagination
+    filter_backends = [OrderingFilter]
+    ordering_fields = "__all__"
+    ordering = ["-date", "-id"]
 
-    @swagger_auto_schema(operation_description=SALES_PERMISSION_NOTE)
+    def get_queryset(self):
+        qs = super().get_queryset()
+        name = self.request.query_params.get("name")
+        customer_type = self.request.query_params.get("type")
+        if name:
+            qs = qs.filter(customer__customer_name__icontains=name)
+        if customer_type == 'walkin':
+            qs = qs.filter(customer__isnull=True)
+        elif customer_type == 'loyal':
+            qs = qs.filter(customer__isnull=False)
+        return qs
+
+    @swagger_auto_schema(
+        operation_description=SALES_PERMISSION_NOTE,
+        manual_parameters=[
+            openapi.Parameter(
+                "name", openapi.IN_QUERY,
+                description="Search invoices by customer name (case-insensitive, partial match)",
+                type=openapi.TYPE_STRING,
+            ),
+            openapi.Parameter(
+                "page", openapi.IN_QUERY,
+                description="Page number (default: 1)",
+                type=openapi.TYPE_INTEGER,
+            ),
+            openapi.Parameter(
+                "page_size", openapi.IN_QUERY,
+                description="Results per page (default: 10, max: 100)",
+                type=openapi.TYPE_INTEGER,
+            ),
+            openapi.Parameter(
+                "ordering", openapi.IN_QUERY,
+                description="Sort field. Prefix with '-' for descending. "
+                            "E.g. '-date', 'invoice_number', 'paid_amount'",
+                type=openapi.TYPE_STRING,
+            ),
+        ],
+    )
     def list(self, request, *args, **kwargs):
         return super().list(request, *args, **kwargs)
 
