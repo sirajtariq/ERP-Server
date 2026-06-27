@@ -123,11 +123,35 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             "balance_due"
         ]
 
+    def validate(self, attrs):
+        customer = attrs.get('customer')
+        payment_term = attrs.get('payment_term')
+        walk_in_name = attrs.get('walk_in_customer_name')
+
+        if not customer and payment_term == 'Credit':
+            raise serializers.ValidationError(
+                "Walk-in customers can only pay via Cash."
+            )
+        if not customer and not walk_in_name:
+            raise serializers.ValidationError(
+                "Either a customer or walk-in name is required."
+            )
+        if customer and walk_in_name:
+            raise serializers.ValidationError(
+                "Provide either a customer or walk-in name, not both."
+            )
+        return attrs
+
     def create(self, validated_data: dict) -> SalesInvoice:
         items_data = validated_data.pop("items")
         invoice = SalesInvoice.objects.create(**validated_data)
         for item_data in items_data:
             SalesItem.objects.create(invoice=invoice, **item_data)
+
+        if invoice.customer and invoice.payment_term == 'Credit':
+            invoice.customer.credit_balance += invoice.balance_due
+            invoice.customer.save(update_fields=['credit_balance'])
+
         return invoice
 
     def update(self, instance: SalesInvoice, validated_data: dict) -> SalesInvoice:

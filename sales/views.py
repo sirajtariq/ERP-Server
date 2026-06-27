@@ -111,8 +111,13 @@ class SalesInvoiceViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         qs = super().get_queryset()
         name = self.request.query_params.get("name")
+        customer_type = self.request.query_params.get("type")
         if name:
             qs = qs.filter(customer__customer_name__icontains=name)
+        if customer_type == 'walkin':
+            qs = qs.filter(customer__isnull=True)
+        elif customer_type == 'loyal':
+            qs = qs.filter(customer__isnull=False)
         return qs
 
     @swagger_auto_schema(
