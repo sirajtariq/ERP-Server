@@ -7,9 +7,47 @@ single request can create or replace an invoice together with its items.
 
 from decimal import Decimal
 
+from django.db.models import Sum
 from rest_framework import serializers
 
 from sales.models import Customer, SalesInvoice, SalesItem
+
+
+class CustomerListSerializer(serializers.ModelSerializer):
+    """Lightweight serializer for customer list views (no nested invoices)."""
+
+    customerId = serializers.IntegerField(source="customer_id", read_only=True)
+    customerName = serializers.CharField(source="customer_name", read_only=True)
+    Phone = serializers.CharField(source="phone", read_only=True)
+    creditBalance = serializers.DecimalField(
+        source="credit_balance", max_digits=12, decimal_places=2, read_only=True
+    )
+    advanceBalance = serializers.DecimalField(
+        source="advance_balance", max_digits=12, decimal_places=2, read_only=True
+    )
+    totalPaid = serializers.SerializerMethodField()
+    totalDue = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Customer
+        fields = [
+            "id",
+            "customerId",
+            "customerName",
+            "Phone",
+            "creditBalance",
+            "advanceBalance",
+            "totalPaid",
+            "totalDue",
+        ]
+        read_only_fields = fields
+
+    def get_totalPaid(self, obj):
+        result = obj.invoices.aggregate(total=Sum("paid_amount"))
+        return float(result["total"] or 0)
+
+    def get_totalDue(self, obj):
+        return float(obj.credit_balance)
 
 
 class CustomerInvoiceNestedSerializer(serializers.ModelSerializer):
@@ -147,10 +185,6 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         invoice = SalesInvoice.objects.create(**validated_data)
         for item_data in items_data:
             SalesItem.objects.create(invoice=invoice, **item_data)
-
-        if invoice.customer and invoice.payment_term == 'Credit':
-            invoice.customer.credit_balance += invoice.balance_due
-            invoice.customer.save(update_fields=['credit_balance'])
 
         return invoice
 

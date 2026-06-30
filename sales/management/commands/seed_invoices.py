@@ -16,6 +16,7 @@ from decimal import Decimal
 from django.core.management.base import BaseCommand
 
 from sales.models import Customer, SalesInvoice, SalesItem
+from sales.management.commands.seed_customers import FIRST_NAMES, LAST_NAMES
 
 # Realistic product/service items
 PRODUCTS = [
@@ -116,10 +117,17 @@ class Command(BaseCommand):
         created_items = 0
 
         for i in range(count):
-            customer = random.choice(selected_customers)
+            is_walkin = random.random() < 0.2
+            if is_walkin:
+                customer = None
+                walk_in_customer_name = f"{random.choice(FIRST_NAMES)} {random.choice(LAST_NAMES)}"
+                payment_term = "Cash"
+            else:
+                customer = random.choice(selected_customers)
+                walk_in_customer_name = ""
+                payment_term = random.choice(["Cash", "Credit"])
 
             # Randomize invoice details
-            payment_term = random.choice(["Cash", "Credit"])
             payment_method = random.choice(PAYMENT_METHODS)
             vat_pct = random.choice([0, 0, 5, 10, 15, 18])
             invoice_discount = Decimal(str(round(random.uniform(0, 50), 2))) if random.random() < 0.3 else Decimal("0.00")
@@ -129,6 +137,7 @@ class Command(BaseCommand):
             try:
                 invoice = SalesInvoice.objects.create(
                     customer=customer,
+                    walk_in_customer_name=walk_in_customer_name or None,
                     payment_term=payment_term,
                     payment_method=payment_method if payment_method else "",
                     vat_percentage=Decimal(str(vat_pct)),
@@ -168,7 +177,11 @@ class Command(BaseCommand):
                     net = net - invoice.invoice_discount
                     tax = net * (invoice.vat_percentage / Decimal("100"))
                     net_with_tax = net + tax
-                    invoice.paid_amount = net_with_tax if random.random() < 0.5 else Decimal(str(round(float(net_with_tax) * random.uniform(0.3, 0.9), 2)))
+                    
+                    if payment_term == "Cash":
+                        invoice.paid_amount = net_with_tax
+                    else:
+                        invoice.paid_amount = net_with_tax if random.random() < 0.5 else Decimal(str(round(float(net_with_tax) * random.uniform(0.3, 0.9), 2)))
                     invoice.save()
 
                 created_invoices += 1
@@ -180,6 +193,10 @@ class Command(BaseCommand):
         total_items = SalesItem.objects.count()
         customers_with = Customer.objects.filter(invoices__isnull=False).distinct().count()
         customers_without = Customer.objects.filter(invoices__isnull=True).count()
+
+        # Recalculate customer balances to keep DB state in sync
+        for c in Customer.objects.all():
+            c.save()
 
         self.stdout.write(
             self.style.SUCCESS(
