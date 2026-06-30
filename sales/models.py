@@ -30,11 +30,26 @@ class Customer(models.Model):
         return self.customer_name
 
     def save(self, *args, **kwargs):
-        if not self.id:
+        is_new = not self.id
+        if is_new:
             with transaction.atomic():
                 last = Customer.objects.select_for_update()\
                                .order_by('-customer_id').first()
                 self.customer_id = (last.customer_id + 1) if last else 4000
+        
+        # Recalculate credit and advance balances from saved invoices
+        saved_invoices = self.invoices.filter(status='Saved') if self.id else []
+        net_outstanding = Decimal(str(self.opening_credit or '0.00'))
+        for inv in saved_invoices:
+            net_outstanding += inv.balance_due
+        
+        if net_outstanding >= 0:
+            self.credit_balance = net_outstanding
+            self.advance_balance = Decimal('0.00')
+        else:
+            self.credit_balance = Decimal('0.00')
+            self.advance_balance = abs(net_outstanding)
+            
         super().save(*args, **kwargs)
 
 

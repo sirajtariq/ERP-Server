@@ -16,7 +16,7 @@ from rest_framework import permissions
 from rest_framework.routers import DefaultRouter
 from rest_framework_simplejwt.views import TokenRefreshView, TokenBlacklistView
 
-from erp_backend.views import UserViewSet, CustomTokenObtainPairView, PasswordChangeAPIView
+from erp_backend.views import UserViewSet, CustomTokenObtainPairView, PasswordChangeAPIView, UserMeAPIView
 
 router = DefaultRouter()
 router.register(r"users", UserViewSet, basename="user")
@@ -59,6 +59,7 @@ urlpatterns = [
     path("api/auth/login/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
     path("api/auth/logout/", TokenBlacklistView.as_view(), name="token_blacklist"),
     path("api/auth/password/change/", PasswordChangeAPIView.as_view(), name="password_change"),
+    path("api/auth/me/", UserMeAPIView.as_view(), name="user_me"),
     # Core APIs
     path("api/", include(router.urls)),
     # Module APIs

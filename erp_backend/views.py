@@ -6,7 +6,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework_simplejwt.views import TokenObtainPairView
 
-from erp_backend.serializers import UserSerializer, CustomTokenObtainPairSerializer, PasswordChangeSerializer
+from erp_backend.serializers import UserSerializer, CustomTokenObtainPairSerializer, PasswordChangeSerializer, UserMeSerializer
 from erp_backend.permissions import IsAdminUser, _user_in_group, ADMIN_GROUP
 
 class CustomTokenObtainPairView(TokenObtainPairView):
@@ -74,3 +74,17 @@ class UserViewSet(viewsets.ModelViewSet):
     queryset = User.objects.all().order_by('-date_joined')
     serializer_class = UserSerializer
     permission_classes = [IsAdminUser]
+
+
+class UserMeAPIView(generics.RetrieveAPIView):
+    """
+    API to retrieve the details of the currently logged-in user.
+    - Requires Authentication.
+    - Password hash is omitted by UserMeSerializer.
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = UserMeSerializer
+
+    def get_object(self):
+        return self.request.user
+
