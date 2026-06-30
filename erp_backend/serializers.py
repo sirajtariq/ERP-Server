@@ -85,3 +85,26 @@ class PasswordChangeSerializer(serializers.Serializer):
     old_password = serializers.CharField(required=False, allow_blank=True, help_text="Required for non-superusers/non-admins, or when changing own password.")
     new_password = serializers.CharField(required=True)
 
+
+class UserMeSerializer(serializers.ModelSerializer):
+    role = serializers.SerializerMethodField(help_text="Role constant of the user.")
+
+    class Meta:
+        model = User
+        fields = [
+            'id', 
+            'username', 
+            'email', 
+            'first_name', 
+            'last_name', 
+            'is_active', 
+            'is_staff', 
+            'is_superuser', 
+            'date_joined',
+            'role'
+        ]
+
+    def get_role(self, obj):
+        return CustomTokenObtainPairSerializer._resolve_role(obj)
+
+
