@@ -2,12 +2,14 @@
 Management command to seed sales invoices with line items.
 
 Creates invoices for a random subset of existing customers so that some
-customers have invoices and others have empty arrays.
+customers have invoices and others have empty arrays. Respects the
+customer_type field — walk-in customers can only be invoiced with
+payment_term='Cash', permanent customers can get Cash or Credit.
 
 Usage:
-    python manage.py seed_invoices
-    python manage.py seed_invoices --count 40
-    python manage.py seed_invoices --clear
+    uv run python manage.py seed_invoices
+    uv run python manage.py seed_invoices --count 40
+    uv run python manage.py seed_invoices --clear
 """
 
 import random
@@ -16,7 +18,6 @@ from decimal import Decimal
 from django.core.management.base import BaseCommand
 
 from sales.models import Customer, SalesInvoice, SalesItem
-from sales.management.commands.seed_customers import FIRST_NAMES, LAST_NAMES
 
 # Realistic product/service items
 PRODUCTS = [
@@ -100,8 +101,10 @@ class Command(BaseCommand):
             )
             return
 
-        customers = list(Customer.objects.all())
-        if not customers:
+        permanent_customers = list(Customer.objects.filter(customer_type="permanent"))
+        walkin_customers = list(Customer.objects.filter(customer_type="walkin"))
+
+        if not permanent_customers and not walkin_customers:
             self.stdout.write(
                 self.style.ERROR(
                     "No customers found. Run 'seed_customers' first."
@@ -109,23 +112,33 @@ class Command(BaseCommand):
             )
             return
 
-        # Pick ~60% of customers to have invoices (rest will have empty arrays)
-        num_customers_with_invoices = max(1, int(len(customers) * 0.6))
-        selected_customers = random.sample(customers, num_customers_with_invoices)
+        # Pick ~60% of permanent customers to have invoices (rest get empty arrays)
+        num_permanent_with_invoices = max(1, int(len(permanent_customers) * 0.6)) if permanent_customers else 0
+        selected_permanent = (
+            random.sample(permanent_customers, num_permanent_with_invoices)
+            if permanent_customers else []
+        )
 
         created_invoices = 0
         created_items = 0
 
         for i in range(count):
-            is_walkin = random.random() < 0.2
-            if is_walkin:
-                customer = None
-                walk_in_customer_name = f"{random.choice(FIRST_NAMES)} {random.choice(LAST_NAMES)}"
-                payment_term = "Cash"
+            # ~20% of invoices go to walk-in customers (if any exist), rest to permanent
+            use_walkin = walkin_customers and random.random() < 0.2
+
+            if use_walkin:
+                customer = random.choice(walkin_customers)
+                payment_term = "Cash"  # Walk-in customers can only pay Cash
             else:
-                customer = random.choice(selected_customers)
-                walk_in_customer_name = ""
-                payment_term = random.choice(["Cash", "Credit"])
+                if not selected_permanent:
+                    # No permanent customers available, fall back to walk-in if possible
+                    if not walkin_customers:
+                        continue
+                    customer = random.choice(walkin_customers)
+                    payment_term = "Cash"
+                else:
+                    customer = random.choice(selected_permanent)
+                    payment_term = random.choice(["Cash", "Credit"])
 
             # Randomize invoice details
             payment_method = random.choice(PAYMENT_METHODS)
@@ -137,7 +150,6 @@ class Command(BaseCommand):
             try:
                 invoice = SalesInvoice.objects.create(
                     customer=customer,
-                    walk_in_customer_name=walk_in_customer_name or None,
                     payment_term=payment_term,
                     payment_method=payment_method if payment_method else "",
                     vat_percentage=Decimal(str(vat_pct)),
@@ -177,12 +189,18 @@ class Command(BaseCommand):
                     net = net - invoice.invoice_discount
                     tax = net * (invoice.vat_percentage / Decimal("100"))
                     net_with_tax = net + tax
-                    
+
                     if payment_term == "Cash":
                         invoice.paid_amount = net_with_tax
                     else:
                         invoice.paid_amount = net_with_tax if random.random() < 0.5 else Decimal(str(round(float(net_with_tax) * random.uniform(0.3, 0.9), 2)))
                     invoice.save()
+
+                # Update customer credit_balance for Credit invoices, matching
+                # the same logic used in SalesInvoiceSerializer.create()
+                if invoice.customer and invoice.payment_term == "Credit":
+                    invoice.customer.credit_balance += invoice.balance_due
+                    invoice.customer.save(update_fields=["credit_balance"])
 
                 created_invoices += 1
 
@@ -193,10 +211,6 @@ class Command(BaseCommand):
         total_items = SalesItem.objects.count()
         customers_with = Customer.objects.filter(invoices__isnull=False).distinct().count()
         customers_without = Customer.objects.filter(invoices__isnull=True).count()
-
-        # Recalculate customer balances to keep DB state in sync
-        for c in Customer.objects.all():
-            c.save()
 
         self.stdout.write(
             self.style.SUCCESS(

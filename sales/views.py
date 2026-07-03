@@ -4,6 +4,8 @@ Sales module API viewsets with RBAC enforcement.
 
 from decimal import Decimal
 
+from django.db import transaction
+
 from django.db.models import Sum
 from drf_yasg import openapi
 from drf_yasg.utils import swagger_auto_schema
@@ -11,6 +13,7 @@ from rest_framework import viewsets
 from rest_framework.decorators import action
 from rest_framework.filters import OrderingFilter
 from rest_framework.response import Response
+from rest_framework import status as drf_status
 
 from erp_backend.permissions import IsSalesUser
 from sales.models import Customer, SalesInvoice, SalesItem
@@ -48,8 +51,11 @@ class CustomerViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         qs = super().get_queryset()
         name = self.request.query_params.get("name")
+        customer_type = self.request.query_params.get("type")
         if name:
             qs = qs.filter(customer_name__icontains=name)
+        if customer_type:
+            qs = qs.filter(customer_type=customer_type)
         return qs
 
     @swagger_auto_schema(
@@ -74,6 +80,11 @@ class CustomerViewSet(viewsets.ModelViewSet):
                 "ordering", openapi.IN_QUERY,
                 description="Sort field. Prefix with '-' for descending. "
                             "E.g. 'customer_name', '-created_at', 'credit_balance'",
+                type=openapi.TYPE_STRING,
+            ),
+            openapi.Parameter(
+                "type", openapi.IN_QUERY,
+                description="Filter by customer type: 'permanent' or 'walkin'",
                 type=openapi.TYPE_STRING,
             ),
         ],
@@ -202,6 +213,40 @@ class CustomerViewSet(viewsets.ModelViewSet):
             "summary": summary,
             "ledger": ledger_entries,
             "finalPaymentDetails": final_payment_details,
+        })
+
+    @action(detail=True, methods=['post'], url_path='convert-to-permanent')
+    def convert_to_permanent(self, request, **kwargs):
+        """Convert a walk-in customer to a permanent customer."""
+        customer = self.get_object()
+
+        if customer.customer_type == 'permanent':
+            return Response(
+                {"error": "Customer is already a permanent customer."},
+                status=drf_status.HTTP_400_BAD_REQUEST,
+            )
+
+        phone = request.data.get('phone')
+        if not phone:
+            return Response(
+                {"error": "Phone number is required to convert to permanent."},
+                status=drf_status.HTTP_400_BAD_REQUEST,
+            )
+
+        with transaction.atomic():
+            last = Customer.objects.select_for_update()\
+                           .filter(customer_type='permanent')\
+                           .order_by('-customer_id').first()
+            new_id = (last.customer_id + 1) if last else 4000
+
+            customer.customer_type = 'permanent'
+            customer.customer_id = new_id
+            customer.phone = phone
+            customer.save()
+
+        return Response({
+            "message": "Customer converted to permanent successfully.",
+            "customerId": customer.customer_id,
         })
 
 

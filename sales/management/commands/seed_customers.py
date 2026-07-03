@@ -2,9 +2,9 @@
 Management command to seed ~70 realistic customer records.
 
 Usage:
-    python manage.py seed_customers
-    python manage.py seed_customers --count 80
-    python manage.py seed_customers --clear   # delete existing customers first
+    uv run python manage.py seed_customers
+    uv run python manage.py seed_customers --count 80
+    uv run python manage.py seed_customers --clear   # delete existing customers first
 """
 
 import random
@@ -58,6 +58,9 @@ EMAIL_DOMAINS = [
     "business.pk", "company.com", "enterprise.net",
 ]
 
+# Ratio of walk-in customers to generate (rest will be permanent)
+WALKIN_RATIO = 0.15
+
 
 def generate_phone():
     """Generate a Pakistani-style phone number."""
@@ -68,7 +71,7 @@ def generate_phone():
     return f"{random.choice(prefixes)}{random.randint(1000000, 9999999)}"
 
 
-def generate_customer_data(index):
+def generate_customer_data(index, customer_type="permanent"):
     """Generate a single customer's data dictionary."""
     first = random.choice(FIRST_NAMES)
     last = random.choice(LAST_NAMES)
@@ -87,24 +90,37 @@ def generate_customer_data(index):
     email_user = f"{first.lower()}.{last.lower()}{random.randint(1, 99)}"
     email = f"{email_user}@{random.choice(EMAIL_DOMAINS)}"
 
-    # Randomize financials
-    opening_credit = Decimal(str(round(random.uniform(0, 50000), 2))) if random.random() < 0.6 else None
-    opening_note = f"Opening balance as of account setup" if opening_credit else ""
-    tax_number = f"NTN-{random.randint(1000000, 9999999)}" if random.random() < 0.5 else None
+    if customer_type == "permanent":
+        # Permanent customers have full financial history
+        opening_credit = (
+            Decimal(str(round(random.uniform(0, 50000), 2)))
+            if random.random() < 0.6 else None
+        )
+        opening_note = "Opening balance as of account setup" if opening_credit else ""
+        tax_number = f"NTN-{random.randint(1000000, 9999999)}" if random.random() < 0.5 else None
+        phone = generate_phone()
+    else:
+        # Walk-in customers: minimal data, no opening balances/credit history
+        opening_credit = None
+        opening_note = ""
+        tax_number = None
+        # Some walk-ins may not have a phone at all (optional field)
+        phone = generate_phone() if random.random() < 0.5 else None
 
     return {
         "customer_name": name,
-        "phone": generate_phone(),
-        "email": email,
-        "address": address,
+        "phone": phone,
+        "email": email if customer_type == "permanent" else None,
+        "address": address if customer_type == "permanent" else "",
         "opening_credit": opening_credit,
         "opening_note": opening_note,
         "tax_number": tax_number,
+        "customer_type": customer_type,
     }
 
 
 class Command(BaseCommand):
-    help = "Seed the database with realistic customer records for testing."
+    help = "Seed the database with realistic customer records (permanent + walk-in) for testing."
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -118,12 +134,34 @@ class Command(BaseCommand):
             action="store_true",
             help="Delete all existing customers before seeding",
         )
+        parser.add_argument(
+            "--walkin-ratio",
+            type=float,
+            default=WALKIN_RATIO,
+            help="Fraction of customers that should be walk-in (default: 0.15)",
+        )
 
     def handle(self, *args, **options):
         count = options["count"]
         clear = options["clear"]
+        walkin_ratio = options["walkin_ratio"]
 
         if clear:
+            # Customer FK on SalesInvoice uses on_delete=PROTECT, so any
+            # existing invoices must be removed first or the customer
+            # delete will be blocked.
+            from sales.models import SalesInvoice, SalesItem
+            invoices_deleted = SalesInvoice.objects.all().count()
+            SalesItem.objects.all().delete()
+            SalesInvoice.objects.all().delete()
+            if invoices_deleted:
+                self.stdout.write(
+                    self.style.WARNING(
+                        f"Deleted {invoices_deleted} invoices (and their items) "
+                        f"first, since they reference customers via a PROTECTed FK."
+                    )
+                )
+
             deleted, _ = Customer.objects.all().delete()
             self.stdout.write(self.style.WARNING(f"Deleted {deleted} existing customers."))
 
@@ -137,26 +175,36 @@ class Command(BaseCommand):
             )
             return
 
-        created = 0
+        created_permanent = 0
+        created_walkin = 0
         skipped = 0
+
         for i in range(count):
-            data = generate_customer_data(i)
-            # Ensure unique phone
-            if Customer.objects.filter(phone=data["phone"]).exists():
+            customer_type = "walkin" if random.random() < walkin_ratio else "permanent"
+            data = generate_customer_data(i, customer_type=customer_type)
+
+            # Ensure unique phone only when a phone is actually provided
+            if data["phone"] and Customer.objects.filter(phone=data["phone"]).exists():
                 skipped += 1
                 continue
+
             try:
                 Customer.objects.create(**data)
-                created += 1
+                if customer_type == "permanent":
+                    created_permanent += 1
+                else:
+                    created_walkin += 1
                 # Small stagger so created_at timestamps differ for sorting tests
                 time.sleep(0.05)
             except Exception as e:
                 self.stdout.write(self.style.ERROR(f"Error creating customer: {e}"))
                 skipped += 1
 
+        total_created = created_permanent + created_walkin
         self.stdout.write(
             self.style.SUCCESS(
-                f"Successfully created {created} customers "
-                f"({skipped} skipped). Total: {Customer.objects.count()}"
+                f"Successfully created {total_created} customers "
+                f"({created_permanent} permanent, {created_walkin} walk-in, "
+                f"{skipped} skipped). Total in DB: {Customer.objects.count()}"
             )
         )

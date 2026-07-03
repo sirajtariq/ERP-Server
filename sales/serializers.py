@@ -18,6 +18,7 @@ class CustomerListSerializer(serializers.ModelSerializer):
 
     customerId = serializers.IntegerField(source="customer_id", read_only=True)
     customerName = serializers.CharField(source="customer_name", read_only=True)
+    customerType = serializers.CharField(source="customer_type", read_only=True)
     Phone = serializers.CharField(source="phone", read_only=True)
     creditBalance = serializers.DecimalField(
         source="credit_balance", max_digits=12, decimal_places=2, read_only=True
@@ -34,6 +35,7 @@ class CustomerListSerializer(serializers.ModelSerializer):
             "id",
             "customerId",
             "customerName",
+            "customerType",
             "Phone",
             "creditBalance",
             "advanceBalance",
@@ -77,12 +79,12 @@ class CustomerSerializer(serializers.ModelSerializer):
     
     customerId = serializers.IntegerField(source="customer_id", read_only=True)
     customerName = serializers.CharField(source="customer_name")
-    Phone = serializers.CharField(source="phone")
+    customerType = serializers.ChoiceField(source="customer_type",choices=['permanent', 'walkin'],required=True)
+    Phone = serializers.CharField(source="phone", required=False, allow_blank=True, allow_null=True)
     Address = serializers.CharField(source="address")
     openingCredit = serializers.DecimalField(source="opening_credit", max_digits=12, decimal_places=2, required=False, allow_null=True)
     openingNote = serializers.CharField(source="opening_note", required=False, allow_blank=True)
-
-    taxNumber = serializers.CharField(source="tax_number", required=False, allow_null=True)
+    taxNumber = serializers.CharField(source="tax_number", required=False, allow_null=True,allow_blank=True)
     creditBalance = serializers.DecimalField(source="credit_balance", max_digits=12, decimal_places=2, read_only=True)
     advanceBalance = serializers.DecimalField(source="advance_balance", max_digits=12, decimal_places=2, read_only=True)
     createdAt = serializers.DateTimeField(source="created_at", read_only=True)
@@ -91,7 +93,7 @@ class CustomerSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Customer
-        fields = ["id", "customerId", "customerName", "Phone", "email", "Address", "openingCredit", "openingNote", "taxNumber", "creditBalance", "advanceBalance", "createdAt", "updatedAt", "invoices"]
+        fields = ["id", "customerId", "customerName", "customerType", "Phone", "email", "Address", "openingCredit", "openingNote", "taxNumber", "creditBalance", "advanceBalance", "createdAt", "updatedAt", "invoices"]
         read_only_fields = ["id", "customerId", "creditBalance", "advanceBalance", "createdAt", "updatedAt", "invoices"]
 
 
@@ -133,7 +135,6 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             "date",
             "customer",
             "customer_data",
-            "walk_in_customer_name",
             "payment_term",
             "payment_method",
             "paid_amount",
@@ -164,27 +165,47 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         customer = attrs.get('customer')
         payment_term = attrs.get('payment_term')
-        walk_in_name = attrs.get('walk_in_customer_name')
+        walk_in_name = self.initial_data.get('walk_in_customer_name')
 
-        if not customer and payment_term == 'Credit':
-            raise serializers.ValidationError(
-                "Walk-in customers can only pay via Cash."
-            )
         if not customer and not walk_in_name:
             raise serializers.ValidationError(
                 "Either a customer or walk-in name is required."
             )
-        if customer and walk_in_name:
+
+        # Check credit restriction for existing walk-in customer
+        if customer and hasattr(customer, 'customer_type') and customer.customer_type == 'walkin' and payment_term == 'Credit':
             raise serializers.ValidationError(
-                "Provide either a customer or walk-in name, not both."
+                "Walk-in customers can only pay via Cash."
             )
+
+        # Check credit restriction for new walk-in (customer not yet created)
+        if not customer and walk_in_name and payment_term == 'Credit':
+            raise serializers.ValidationError(
+                "Walk-in customers can only pay via Cash."
+            )
+
         return attrs
 
     def create(self, validated_data: dict) -> SalesInvoice:
         items_data = validated_data.pop("items")
+
+        # Auto-create walk-in customer if no customer provided
+        if not validated_data.get('customer'):
+            walk_in_name = self.initial_data.get('walk_in_customer_name')
+            if walk_in_name:
+                walkin_customer = Customer.objects.create(
+                    customer_name=walk_in_name,
+                    customer_type='walkin',
+                )
+                validated_data['customer'] = walkin_customer
+
         invoice = SalesInvoice.objects.create(**validated_data)
         for item_data in items_data:
             SalesItem.objects.create(invoice=invoice, **item_data)
+
+        # Update credit_balance when payment_term is Credit
+        if invoice.payment_term == 'Credit' and invoice.customer:
+            invoice.customer.save()
 
         return invoice
 
