@@ -52,19 +52,6 @@ class Customer(SoftDeleteModel):
                                    .order_by('-customer_id').first()
                 self.customer_id = (last.customer_id + 1) if last else start_id
         
-        # Recalculate credit and advance balances from saved invoices
-        saved_invoices = self.invoices.filter(status='Saved') if self.id else []
-        net_outstanding = Decimal(str(self.opening_credit or '0.00'))
-        for inv in saved_invoices:
-            net_outstanding += inv.balance_due
-        
-        if net_outstanding >= 0:
-            self.credit_balance = net_outstanding
-            self.advance_balance = Decimal('0.00')
-        else:
-            self.credit_balance = Decimal('0.00')
-            self.advance_balance = abs(net_outstanding)
-            
         super().save(*args, **kwargs)
 
 
@@ -87,6 +74,7 @@ class SalesInvoice(SoftDeleteModel):
     payment_term = models.CharField(max_length=10, choices=PAYMENT_TERM_CHOICES, default='Credit')
     payment_method = models.CharField(max_length=50, blank=True, null=True)
     paid_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0.0)
+    advance_applied = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     payment_reference = models.CharField(max_length=255, blank=True, null=True)
     notes = models.TextField(blank=True, null=True)
     vat_percentage = models.DecimalField(max_digits=5, decimal_places=2, default=0.0)

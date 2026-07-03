@@ -185,6 +185,9 @@ class CustomerViewSet(viewsets.ModelViewSet):
         ))
         total_purchases = float(sum(inv.net_total for inv in all_invoices))
         total_invoices = len(all_invoices)
+        total_advance_applied = float(sum(
+            float(inv.advance_applied) for inv in all_invoices
+        ))
 
         ledger_rows = []
 
@@ -213,6 +216,17 @@ class CustomerViewSet(viewsets.ModelViewSet):
                 "balance": 0,
                 "_sort_ts": inv.created_at,
             })
+            # Advance-applied credit row (adjacent to its invoice)
+            if inv.advance_applied > 0:
+                ledger_rows.append({
+                    "date": inv.date.isoformat() if inv.date else None,
+                    "voucher": f"ADV-{inv.invoice_number}",
+                    "description": "Advance Applied",
+                    "debit": 0,
+                    "credit": float(inv.advance_applied),
+                    "balance": 0,
+                    "_sort_ts": inv.created_at,
+                })
 
         # credit entries from payments
         for pay in all_payments:
@@ -252,7 +266,7 @@ class CustomerViewSet(viewsets.ModelViewSet):
         summary = {
             "creditSales": credit_sales,
             "cashReturn": cash_return,
-            "advanceApplied": 0,
+            "advanceApplied": total_advance_applied,
             "totalCollected": total_paid,
             "remainingBalance": remaining_balance,
             "totalInvoices": total_invoices,
@@ -265,7 +279,7 @@ class CustomerViewSet(viewsets.ModelViewSet):
             "openingBalance": opening_credit,
             "totalPurchases": total_purchases,
             "paymentsReceived": total_paid,
-            "advanceUsed": 0,
+            "advanceUsed": total_advance_applied,
             "totalCollected": total_paid,
             "availableAdvance": available_advance,
             "remainingBalance": remaining_balance,
@@ -394,10 +408,13 @@ class SalesInvoiceViewSet(viewsets.ModelViewSet):
     def destroy(self, request, *args, **kwargs):
         invoice = self.get_object()
 
-        # Reverse the customer's credit_balance if this was a Credit invoice
         if invoice.customer and invoice.payment_term == 'Credit':
             invoice.customer.credit_balance -= invoice.balance_due
             invoice.customer.save(update_fields=['credit_balance'])
+
+        if invoice.customer and invoice.advance_applied > 0:
+            invoice.customer.advance_balance += invoice.advance_applied
+            invoice.customer.save(update_fields=['advance_balance'])
 
         invoice.soft_delete()
 
@@ -417,21 +434,20 @@ class SalesInvoiceViewSet(viewsets.ModelViewSet):
     @swagger_auto_schema(operation_description=SALES_PERMISSION_NOTE)
     @action(detail=True, methods=['post'], url_path='restore')
     def restore(self, request, pk=None):
-        invoice = SalesInvoice.all_objects.filter(
-            id=pk, is_deleted=True
-        ).first()
+        invoice = SalesInvoice.all_objects.filter(id=pk, is_deleted=True).first()
         if not invoice:
-            return Response(
-                {"error": "Not found in trash."},
-                status=drf_status.HTTP_404_NOT_FOUND
-            )
+            return Response({"error": "Not found in trash."}, status=drf_status.HTTP_404_NOT_FOUND)
 
-        # Re-apply the customer's credit_balance if this was a Credit invoice
         if invoice.customer and invoice.payment_term == 'Credit':
             invoice.customer.credit_balance += invoice.balance_due
             invoice.customer.save(update_fields=['credit_balance'])
 
+        if invoice.customer and invoice.advance_applied > 0:
+            invoice.customer.advance_balance -= invoice.advance_applied
+            invoice.customer.save(update_fields=['advance_balance'])
+
         invoice.restore()
+
         return Response({"message": "Invoice restored, balance re-applied."})
 
     @swagger_auto_schema(operation_description=SALES_PERMISSION_NOTE)

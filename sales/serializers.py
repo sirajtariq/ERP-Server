@@ -149,6 +149,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             "tax_amount",
             "net_total",
             "balance_due",
+            "advance_applied",
         ]
         read_only_fields = [
             "id", 
@@ -159,7 +160,8 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             "total_line_discount", 
             "tax_amount", 
             "net_total", 
-            "balance_due"
+            "balance_due",
+            "advance_applied"
         ]
 
     def validate(self, attrs):
@@ -200,19 +202,43 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                 validated_data['customer'] = walkin_customer
 
         invoice = SalesInvoice.objects.create(**validated_data)
+        # Capture the original paid_amount from the request BEFORE advance
+        # consumption modifies it — used later for auto-PaymentReceived.
+        original_paid_amount = invoice.paid_amount
+
         for item_data in items_data:
             SalesItem.objects.create(invoice=invoice, **item_data)
 
+        # Advance consumption: if customer has advance_balance, apply it
+        # towards this invoice's balance_due before any credit_balance update.
+        if invoice.customer:
+            remaining_due = invoice.balance_due
+            available_advance = invoice.customer.advance_balance
+
+            if available_advance > 0 and remaining_due > 0:
+                consume_amount = min(available_advance, remaining_due)
+
+                invoice.advance_applied = consume_amount
+                invoice.paid_amount += consume_amount
+                invoice.save(update_fields=['advance_applied', 'paid_amount'])
+
+                invoice.customer.advance_balance -= consume_amount
+                invoice.customer.save(update_fields=['advance_balance'])
+
         # Update credit_balance when payment_term is Credit
         if invoice.payment_term == 'Credit' and invoice.customer:
-            invoice.customer.save()
+            invoice.customer.refresh_from_db(fields=['credit_balance'])
+            invoice.customer.credit_balance += invoice.balance_due
+            invoice.customer.save(update_fields=['credit_balance'])
 
-        # Auto-record a PaymentReceived entry for visibility in Daily Income
-        if invoice.customer and invoice.paid_amount > 0:
+        # Auto-record a PaymentReceived entry for visibility in Daily Income.
+        # Only for the ORIGINAL paid_amount from the request, not the advance
+        # consumption portion (which is tracked via advance_applied instead).
+        if invoice.customer and original_paid_amount > 0:
             PaymentReceived.objects.create(
                 customer=invoice.customer,
                 invoice=invoice,
-                amount_received=invoice.paid_amount,
+                amount_received=original_paid_amount,
                 balance_after=invoice.customer.credit_balance,
                 method=invoice.payment_method or 'Cash',
                 notes=f"Auto-recorded from invoice {invoice.invoice_number}",
