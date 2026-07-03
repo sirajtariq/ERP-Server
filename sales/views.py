@@ -16,11 +16,12 @@ from rest_framework.response import Response
 from rest_framework import status as drf_status
 
 from erp_backend.permissions import IsSalesUser
-from sales.models import Customer, SalesInvoice, SalesItem
+from sales.models import Customer, PaymentReceived, SalesInvoice, SalesItem
 from sales.pagination import CustomPageNumberPagination
 from sales.serializers import (
     CustomerListSerializer,
     CustomerSerializer,
+    PaymentReceivedSerializer,
     SalesInvoiceSerializer,
     SalesItemSerializer,
 )
@@ -144,7 +145,7 @@ class CustomerViewSet(viewsets.ModelViewSet):
     def permanent_delete(self, request, customer_id=None):
         if not request.user.is_superuser:
             return Response(
-                {"error": "Only superuser can permanently delete."},
+                {"error": "Only superadmin can permanently delete."},
                 status=drf_status.HTTP_403_FORBIDDEN
             )
         customer = Customer.all_objects.filter(
@@ -164,16 +165,14 @@ class CustomerViewSet(viewsets.ModelViewSet):
         customer = self.get_object()
         opening_credit = float(customer.opening_credit or 0)
 
-        invoices = (
-            SalesInvoice.objects
-            .filter(customer=customer, status="Saved")
-            .order_by("date", "id")
-        )
+        invoices = customer.invoices.filter(status="Saved").order_by("date", "id")
+        payments = customer.payments.all().order_by("date", "id")
 
         # net_total is a Python @property, so we calculate aggregates in memory.
         all_invoices = list(
             invoices.select_related("customer").prefetch_related("items")
         )
+        all_payments = list(payments.select_related("invoice"))
 
         credit_sales = float(sum(
             inv.net_total for inv in all_invoices if inv.payment_term == "Credit"
@@ -181,18 +180,80 @@ class CustomerViewSet(viewsets.ModelViewSet):
         cash_return = float(sum(
             float(inv.paid_amount) for inv in all_invoices if inv.payment_term == "Cash"
         ))
-        total_collected = float(sum(float(inv.paid_amount) for inv in all_invoices))
+        total_paid = float(sum(
+            float(pay.amount_received) for pay in all_payments
+        ))
         total_purchases = float(sum(inv.net_total for inv in all_invoices))
         total_invoices = len(all_invoices)
 
-        remaining_balance = float(customer.credit_balance)
-        available_advance = float(customer.advance_balance)
+        ledger_rows = []
+
+        # opening entry
+        if opening_credit > 0:
+            opening_date = customer.created_at.date() if customer.created_at else None
+            ledger_rows.append({
+                "date": opening_date.isoformat() if opening_date else None,
+                "voucher": "OPENING",
+                "description": "Opening Balance",
+                "debit": opening_credit,
+                "credit": 0,
+                "balance": 0,
+                "_sort_ts": customer.created_at,
+            })
+
+        # debit entries from invoices
+        for inv in all_invoices:
+            net = float(inv.net_total)
+            ledger_rows.append({
+                "date": inv.date.isoformat() if inv.date else None,
+                "voucher": inv.invoice_number,
+                "description": f"Invoice - {inv.payment_term}",
+                "debit": net,
+                "credit": 0,
+                "balance": 0,
+                "_sort_ts": inv.created_at,
+            })
+
+        # credit entries from payments
+        for pay in all_payments:
+            description = (
+                f"Payment - {pay.invoice.invoice_number}"
+                if pay.invoice else "General Payment"
+            )
+            ledger_rows.append({
+                "date": pay.date.isoformat() if pay.date else None,
+                "voucher": pay.receipt_number,
+                "description": description,
+                "debit": 0,
+                "credit": float(pay.amount_received),
+                "balance": 0,
+                "_sort_ts": pay.created_at,
+            })
+
+        # sort purely by actual datetime timestamp
+        ledger_rows.sort(key=lambda r: r['_sort_ts'])
+
+        # unified running balance pass over ALL rows (including OPENING)
+        running_balance = Decimal('0')
+        for row in ledger_rows:
+            running_balance += Decimal(str(row['debit'])) - Decimal(str(row['credit']))
+            row['balance'] = float(running_balance)
+
+        # derive remaining/advance from the ledger's own final balance
+        final_balance = Decimal(str(ledger_rows[-1]['balance'])) if ledger_rows else Decimal('0')
+
+        if final_balance >= 0:
+            remaining_balance = float(final_balance)
+            available_advance = 0.0
+        else:
+            remaining_balance = 0.0
+            available_advance = float(abs(final_balance))
 
         summary = {
             "creditSales": credit_sales,
             "cashReturn": cash_return,
             "advanceApplied": 0,
-            "totalCollected": total_collected,
+            "totalCollected": total_paid,
             "remainingBalance": remaining_balance,
             "totalInvoices": total_invoices,
             "openingCredit": opening_credit,
@@ -200,64 +261,23 @@ class CustomerViewSet(viewsets.ModelViewSet):
             "closingBalance": remaining_balance,
         }
 
-        # ---------- build ledger entries ----------
-        ledger_entries = []
-        running_balance = 0.0
-
-        # opening entry
-        if opening_credit > 0:
-            running_balance += opening_credit
-            ledger_entries.append({
-                "date": customer.created_at.isoformat() if customer.created_at else None,
-                "voucher": "OPENING",
-                "description": "Opening Balance",
-                "debit": opening_credit,
-                "credit": 0,
-                "balance": running_balance,
-            })
-
-        for inv in all_invoices:
-            net = float(inv.net_total)
-            paid = float(inv.paid_amount)
-            inv_date = inv.date.isoformat() if inv.date else None
-
-            # debit entry (invoice)
-            running_balance += net
-            ledger_entries.append({
-                "date": inv_date,
-                "voucher": inv.invoice_number,
-                "description": f"Invoice - {inv.payment_term}",
-                "debit": net,
-                "credit": 0,
-                "balance": running_balance,
-            })
-
-            # credit entry (payment)
-            if paid > 0:
-                running_balance -= paid
-                ledger_entries.append({
-                    "date": inv_date,
-                    "voucher": inv.invoice_number,
-                    "description": "Payment Received",
-                    "debit": 0,
-                    "credit": paid,
-                    "balance": running_balance,
-                })
-
-        # ---------- final payment details ----------
         final_payment_details = {
             "openingBalance": opening_credit,
             "totalPurchases": total_purchases,
-            "paymentsReceived": total_collected,
+            "paymentsReceived": total_paid,
             "advanceUsed": 0,
-            "totalCollected": total_collected,
+            "totalCollected": total_paid,
             "availableAdvance": available_advance,
             "remainingBalance": remaining_balance,
         }
 
+        # remove internal keys before returning
+        for row in ledger_rows:
+            row.pop('_sort_ts', None)
+
         return Response({
             "summary": summary,
-            "ledger": ledger_entries,
+            "ledger": ledger_rows,
             "finalPaymentDetails": final_payment_details,
         })
 
@@ -464,3 +484,130 @@ class SalesItemViewSet(viewsets.ModelViewSet):
     @swagger_auto_schema(operation_description=SALES_PERMISSION_NOTE)
     def destroy(self, request, *args, **kwargs):
         return super().destroy(request, *args, **kwargs)
+
+
+class PaymentReceivedViewSet(viewsets.ModelViewSet):
+    """CRUD operations for daily income / payment received records."""
+
+    queryset = PaymentReceived.objects.select_related('customer', 'invoice').all()
+    serializer_class = PaymentReceivedSerializer
+    permission_classes = [IsSalesUser]
+    pagination_class = CustomPageNumberPagination
+    filter_backends = [OrderingFilter]
+    ordering_fields = "__all__"
+    ordering = ["-date", "-id"]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        from_date = self.request.query_params.get('from')
+        to_date = self.request.query_params.get('to')
+        customer = self.request.query_params.get('customer')
+        if from_date and to_date:
+            qs = qs.filter(date__range=[from_date, to_date])
+        if customer:
+            qs = qs.filter(customer__customer_name__icontains=customer)
+        return qs
+
+    @swagger_auto_schema(
+        operation_description=SALES_PERMISSION_NOTE,
+        manual_parameters=[
+            openapi.Parameter(
+                'from', openapi.IN_QUERY,
+                description="Start date for filtering (YYYY-MM-DD)",
+                type=openapi.TYPE_STRING,
+            ),
+            openapi.Parameter(
+                'to', openapi.IN_QUERY,
+                description="End date for filtering (YYYY-MM-DD)",
+                type=openapi.TYPE_STRING,
+            ),
+            openapi.Parameter(
+                'customer', openapi.IN_QUERY,
+                description="Filter by customer name (case-insensitive, partial match)",
+                type=openapi.TYPE_STRING,
+            ),
+            openapi.Parameter(
+                'page', openapi.IN_QUERY,
+                description="Page number (default: 1)",
+                type=openapi.TYPE_INTEGER,
+            ),
+            openapi.Parameter(
+                'page_size', openapi.IN_QUERY,
+                description="Results per page (default: 10, max: 100)",
+                type=openapi.TYPE_INTEGER,
+            ),
+            openapi.Parameter(
+                'ordering', openapi.IN_QUERY,
+                description="Sort field. Prefix with '-' for descending. "
+                            "E.g. '-date', 'amount_received', 'receipt_number'",
+                type=openapi.TYPE_STRING,
+            ),
+        ],
+    )
+    def list(self, request, *args, **kwargs):
+        return super().list(request, *args, **kwargs)
+
+    @swagger_auto_schema(operation_description=SALES_PERMISSION_NOTE)
+    def create(self, request, *args, **kwargs):
+        return super().create(request, *args, **kwargs)
+
+    @swagger_auto_schema(operation_description=SALES_PERMISSION_NOTE)
+    def retrieve(self, request, *args, **kwargs):
+        return super().retrieve(request, *args, **kwargs)
+
+    @swagger_auto_schema(operation_description=SALES_PERMISSION_NOTE)
+    def update(self, request, *args, **kwargs):
+        return super().update(request, *args, **kwargs)
+
+    @swagger_auto_schema(operation_description=SALES_PERMISSION_NOTE)
+    def partial_update(self, request, *args, **kwargs):
+        return super().partial_update(request, *args, **kwargs)
+
+    @swagger_auto_schema(operation_description=SALES_PERMISSION_NOTE)
+    def destroy(self, request, *args, **kwargs):
+        payment = self.get_object()
+        serializer = self.get_serializer()
+        serializer._reverse_payment(
+            payment.customer, payment.invoice,
+            payment.applied_to_invoice, payment.applied_to_credit,
+            payment.applied_to_advance
+        )
+        payment.soft_delete()
+        return Response(
+            {"message": "Payment moved to trash. Balances adjusted."},
+            status=drf_status.HTTP_200_OK,
+        )
+
+    @swagger_auto_schema(operation_description=SALES_PERMISSION_NOTE)
+    @action(detail=False, methods=['get'], url_path='trash')
+    def trash(self, request):
+        deleted = PaymentReceived.all_objects.filter(is_deleted=True)
+        page = self.paginate_queryset(deleted)
+        serializer = self.get_serializer(page, many=True)
+        return self.get_paginated_response(serializer.data)
+
+    @swagger_auto_schema(operation_description=SALES_PERMISSION_NOTE)
+    @action(detail=True, methods=['post'], url_path='restore')
+    def restore(self, request, pk=None):
+        payment = PaymentReceived.all_objects.filter(
+            id=pk, is_deleted=True
+        ).first()
+        if not payment:
+            return Response(
+                {"error": "Not found in trash."},
+                status=drf_status.HTTP_404_NOT_FOUND,
+            )
+        serializer = self.get_serializer()
+        result = serializer._apply_payment(
+            payment.customer, payment.amount_received, payment.invoice
+        )
+        payment.balance_after = result['balance_after']
+        payment.applied_to_invoice = result['applied_to_invoice']
+        payment.applied_to_credit = result['applied_to_credit']
+        payment.applied_to_advance = result['applied_to_advance']
+        payment.save(update_fields=[
+            'balance_after', 'applied_to_invoice',
+            'applied_to_credit', 'applied_to_advance',
+        ])
+        payment.restore()
+        return Response({"message": "Payment restored, balances re-applied."})

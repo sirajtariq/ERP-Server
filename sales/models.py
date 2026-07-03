@@ -100,6 +100,7 @@ class SalesInvoice(SoftDeleteModel):
     
     invoice_number = models.CharField(max_length=50, unique=True, blank=True)
     date = models.DateField(auto_now_add=True)
+    created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         ordering = ["-date", "-id"]
@@ -165,3 +166,67 @@ class SalesItem(models.Model):
 
     def __str__(self) -> str:
         return f"{self.item_name} x{self.quantity}"
+
+
+class PaymentReceived(SoftDeleteModel):
+    """Daily income / payment received record."""
+
+    PAYMENT_METHOD_CHOICES = (
+        ('Cash', 'Cash'),
+        ('Bank Transfer', 'Bank Transfer'),
+        ('JazzCash', 'JazzCash'),
+        ('EasyPaisa', 'EasyPaisa'),
+        ('Cheque', 'Cheque'),
+    )
+
+    customer = models.ForeignKey(
+        Customer, on_delete=models.PROTECT, related_name='payments'
+    )
+    invoice = models.ForeignKey(
+        SalesInvoice, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='payments'
+    )
+    receipt_number = models.CharField(max_length=50, unique=True, blank=True)
+    amount_received = models.DecimalField(max_digits=12, decimal_places=2)
+    balance_after = models.DecimalField(max_digits=12, decimal_places=2)
+    method = models.CharField(
+        max_length=20, choices=PAYMENT_METHOD_CHOICES, default='Cash'
+    )
+    notes = models.TextField(blank=True, null=True)
+    date = models.DateField(null=True, blank=True)
+    applied_to_invoice = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    applied_to_credit = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    applied_to_advance = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-date', '-id']
+
+    def save(self, *args, **kwargs):
+        from datetime import date as _date
+
+        if not self.date:
+            self.date = _date.today()
+
+        if not self.receipt_number:
+            year = self.date.year
+            prefix = f'REC-{year}-'
+            with transaction.atomic():
+                last = (
+                    PaymentReceived.all_objects
+                    .select_for_update()
+                    .filter(receipt_number__startswith=prefix)
+                    .order_by('-id')
+                    .first()
+                )
+                if last:
+                    last_seq = int(last.receipt_number.split('-')[-1])
+                    new_seq = last_seq + 1
+                else:
+                    new_seq = 1
+                self.receipt_number = f'{prefix}{new_seq:05d}'
+
+        super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        return f"{self.receipt_number} — {self.customer}"

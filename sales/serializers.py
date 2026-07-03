@@ -10,7 +10,7 @@ from decimal import Decimal
 from django.db.models import Sum
 from rest_framework import serializers
 
-from sales.models import Customer, SalesInvoice, SalesItem
+from sales.models import Customer, PaymentReceived, SalesInvoice, SalesItem
 
 
 class CustomerListSerializer(serializers.ModelSerializer):
@@ -207,6 +207,17 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         if invoice.payment_term == 'Credit' and invoice.customer:
             invoice.customer.save()
 
+        # Auto-record a PaymentReceived entry for visibility in Daily Income
+        if invoice.customer and invoice.paid_amount > 0:
+            PaymentReceived.objects.create(
+                customer=invoice.customer,
+                invoice=invoice,
+                amount_received=invoice.paid_amount,
+                balance_after=invoice.customer.credit_balance,
+                method=invoice.payment_method or 'Cash',
+                notes=f"Auto-recorded from invoice {invoice.invoice_number}",
+            )
+
         return invoice
 
     def update(self, instance: SalesInvoice, validated_data: dict) -> SalesInvoice:
@@ -219,3 +230,153 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             for item_data in items_data:
                 SalesItem.objects.create(invoice=instance, **item_data)
         return instance
+
+
+class PaymentReceivedSerializer(serializers.ModelSerializer):
+    """Serializer for daily income / payment received records."""
+
+    customerName = serializers.CharField(
+        source='customer.customer_name', read_only=True
+    )
+    invoiceNumber = serializers.CharField(
+        source='invoice.invoice_number', read_only=True, default=None
+    )
+
+    class Meta:
+        model = PaymentReceived
+        fields = [
+            'id',
+            'receipt_number',
+            'date',
+            'customer',
+            'customerName',
+            'invoice',
+            'invoiceNumber',
+            'amount_received',
+            'balance_after',
+            'method',
+            'notes',
+            'applied_to_invoice',
+            'applied_to_credit',
+            'applied_to_advance',
+        ]
+        read_only_fields = [
+            'id',
+            'receipt_number',
+            'balance_after',
+            'applied_to_invoice',
+            'applied_to_credit',
+            'applied_to_advance',
+        ]
+
+    # ── Validation ──────────────────────────────────────────────────
+
+    def validate_amount_received(self, value):
+        if value <= 0:
+            raise serializers.ValidationError(
+                "Amount received must be greater than zero."
+            )
+        return value
+
+    def validate(self, attrs):
+        invoice = attrs.get('invoice')
+        customer = attrs.get('customer')
+        if invoice and customer and invoice.customer_id != customer.id:
+            raise serializers.ValidationError(
+                "The selected invoice does not belong to this customer."
+            )
+        return attrs
+
+    # ── Balance helpers ─────────────────────────────────────────────
+
+    def _apply_payment(self, customer, amount, invoice=None):
+        """Apply payment: invoice balance_due first, then credit_balance, then advance."""
+        remaining = Decimal(str(amount))
+        applied_to_invoice = Decimal('0')
+        applied_to_credit = Decimal('0')
+        applied_to_advance = Decimal('0')
+
+        # Step 1 — pay down the specific invoice's own balance_due first,
+        # capped so we never push invoice.paid_amount past its net_total
+        if invoice:
+            invoice.refresh_from_db(fields=['paid_amount'])
+            invoice_due = invoice.balance_due
+            if invoice_due > 0:
+                applied_to_invoice = min(invoice_due, remaining)
+                invoice.paid_amount += applied_to_invoice
+                invoice.save(update_fields=['paid_amount'])
+                remaining -= applied_to_invoice
+
+        # Step 2 — any leftover clears the customer's general credit_balance
+        if customer.credit_balance > 0 and remaining > 0:
+            applied_to_credit = min(customer.credit_balance, remaining)
+            customer.credit_balance -= applied_to_credit
+            remaining -= applied_to_credit
+
+        # Step 3 — anything still remaining is a genuine overpayment -> advance
+        if remaining > 0:
+            applied_to_advance = remaining
+            customer.advance_balance += applied_to_advance
+
+        customer.save(update_fields=['credit_balance', 'advance_balance'])
+
+        return {
+            'balance_after': customer.credit_balance,
+            'applied_to_invoice': applied_to_invoice,
+            'applied_to_credit': applied_to_credit,
+            'applied_to_advance': applied_to_advance,
+        }
+
+    def _reverse_payment(self, customer, invoice, applied_to_invoice, applied_to_credit, applied_to_advance):
+        """Reverse a previously applied payment using the STORED split amounts."""
+        # Reverse in the exact reverse order
+        if applied_to_advance > 0:
+            customer.advance_balance -= applied_to_advance
+
+        if applied_to_credit > 0:
+            customer.credit_balance += applied_to_credit
+
+        customer.save(update_fields=['credit_balance', 'advance_balance'])
+
+        if invoice and applied_to_invoice > 0:
+            invoice.paid_amount -= applied_to_invoice
+            invoice.save(update_fields=['paid_amount'])
+
+    # ── Create / Update ─────────────────────────────────────────────
+
+    def create(self, validated_data):
+        customer = validated_data['customer']
+        amount = validated_data['amount_received']
+        invoice = validated_data.get('invoice')
+
+        result = self._apply_payment(customer, amount, invoice)
+        validated_data['balance_after'] = result['balance_after']
+        validated_data['applied_to_invoice'] = result['applied_to_invoice']
+        validated_data['applied_to_credit'] = result['applied_to_credit']
+        validated_data['applied_to_advance'] = result['applied_to_advance']
+
+        return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        # Reverse the OLD payment using its STORED split values
+        self._reverse_payment(
+            instance.customer,
+            instance.invoice,
+            instance.applied_to_invoice,
+            instance.applied_to_credit,
+            instance.applied_to_advance,
+        )
+
+        # Apply the NEW payment values fresh
+        new_customer = validated_data.get('customer', instance.customer)
+        new_amount = validated_data.get('amount_received', instance.amount_received)
+        new_invoice = validated_data.get('invoice', instance.invoice)
+
+        result = self._apply_payment(new_customer, new_amount, new_invoice)
+        validated_data['balance_after'] = result['balance_after']
+        validated_data['applied_to_invoice'] = result['applied_to_invoice']
+        validated_data['applied_to_credit'] = result['applied_to_credit']
+        validated_data['applied_to_advance'] = result['applied_to_advance']
+
+        return super().update(instance, validated_data)
+
