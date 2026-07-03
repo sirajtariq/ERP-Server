@@ -10,9 +10,15 @@ from django.db import transaction
 class Customer(models.Model):
     """Customer master record."""
 
+    CUSTOMER_TYPE_CHOICES = (
+        ('permanent', 'Permanent'),
+        ('walkin', 'Walk-in'),
+    )
+
     customer_id = models.IntegerField(unique=True, editable=False, default=4000)
     customer_name = models.CharField(max_length=255)
-    phone = models.CharField(max_length=20, unique=True)
+    customer_type = models.CharField(max_length=10, choices=CUSTOMER_TYPE_CHOICES)
+    phone = models.CharField(max_length=20, unique=True, blank=True, null=True)
     email = models.EmailField(blank=True, null=True)
     address = models.TextField(default="")
     opening_credit = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
@@ -33,9 +39,17 @@ class Customer(models.Model):
         is_new = not self.id
         if is_new:
             with transaction.atomic():
-                last = Customer.objects.select_for_update()\
-                               .order_by('-customer_id').first()
-                self.customer_id = (last.customer_id + 1) if last else 4000
+                if self.customer_type == 'walkin':
+                    start_id = 8000
+                    last = Customer.objects.select_for_update()\
+                                   .filter(customer_type='walkin')\
+                                   .order_by('-customer_id').first()
+                else:
+                    start_id = 4000
+                    last = Customer.objects.select_for_update()\
+                                   .filter(customer_type='permanent')\
+                                   .order_by('-customer_id').first()
+                self.customer_id = (last.customer_id + 1) if last else start_id
         
         # Recalculate credit and advance balances from saved invoices
         saved_invoices = self.invoices.filter(status='Saved') if self.id else []
@@ -63,7 +77,7 @@ class SalesInvoice(models.Model):
         null=True,
         blank=True,
     )
-    walk_in_customer_name = models.CharField(max_length=255, blank=True, null=True)
+
     
     PAYMENT_TERM_CHOICES = (
         ('Cash', 'Cash'),
@@ -123,7 +137,7 @@ class SalesInvoice(models.Model):
         super().save(*args, **kwargs)
 
     def __str__(self) -> str:
-        name = self.customer.customer_name if self.customer else (self.walk_in_customer_name or "Walk-in")
+        name = self.customer.customer_name if self.customer else "Walk-in"
         return f"{self.invoice_number} ({name})"
 
 

@@ -12,15 +12,15 @@ class SalesItemInline(admin.TabularInline):
 
 @admin.register(Customer)
 class CustomerAdmin(admin.ModelAdmin):
-    list_display = ("customer_id", "customer_name", "phone")
+    list_display = ("customer_id", "customer_name", "customer_type", "phone")
     search_fields = ("customer_name", "phone", "customer_id")
 
 
 @admin.register(SalesInvoice)
 class SalesInvoiceAdmin(admin.ModelAdmin):
-    list_display = ("invoice_number", "customer", "walk_in_customer_name", "payment_term", "payment_method", "date", "net_total", "status")
+    list_display = ("invoice_number", "customer", "payment_term", "payment_method", "date", "net_total", "status")
     list_filter = ("date", "payment_term", "status", "customer")
-    search_fields = ("invoice_number", "customer__customer_name", "walk_in_customer_name")
+    search_fields = ("invoice_number", "customer__customer_name")
     inlines = [SalesItemInline]
 
 
