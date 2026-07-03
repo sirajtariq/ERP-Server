@@ -110,7 +110,53 @@ class CustomerViewSet(viewsets.ModelViewSet):
 
     @swagger_auto_schema(operation_description=SALES_PERMISSION_NOTE)
     def destroy(self, request, *args, **kwargs):
-        return super().destroy(request, *args, **kwargs)
+        instance = self.get_object()
+        instance.soft_delete()
+        return Response(
+            {"message": "Customer moved to trash."},
+            status=drf_status.HTTP_200_OK
+        )
+
+    @swagger_auto_schema(operation_description=SALES_PERMISSION_NOTE)
+    @action(detail=False, methods=['get'], url_path='trash')
+    def trash(self, request):
+        deleted_customers = Customer.all_objects.filter(is_deleted=True)
+        page = self.paginate_queryset(deleted_customers)
+        serializer = self.get_serializer(page, many=True)
+        return self.get_paginated_response(serializer.data)
+
+    @swagger_auto_schema(operation_description=SALES_PERMISSION_NOTE)
+    @action(detail=True, methods=['post'], url_path='restore')
+    def restore(self, request, customer_id=None):
+        customer = Customer.all_objects.filter(
+            customer_id=customer_id, is_deleted=True
+        ).first()
+        if not customer:
+            return Response(
+                {"error": "Customer not found in trash."},
+                status=drf_status.HTTP_404_NOT_FOUND
+            )
+        customer.restore()
+        return Response({"message": "Customer restored successfully."})
+
+    @swagger_auto_schema(operation_description=SALES_PERMISSION_NOTE)
+    @action(detail=True, methods=['delete'], url_path='permanent-delete')
+    def permanent_delete(self, request, customer_id=None):
+        if not request.user.is_superuser:
+            return Response(
+                {"error": "Only superuser can permanently delete."},
+                status=drf_status.HTTP_403_FORBIDDEN
+            )
+        customer = Customer.all_objects.filter(
+            customer_id=customer_id, is_deleted=True
+        ).first()
+        if not customer:
+            return Response(
+                {"error": "Not found in trash."},
+                status=drf_status.HTTP_404_NOT_FOUND
+            )
+        customer.delete()  # actual hard delete via Django's default
+        return Response({"message": "Permanently deleted."})
 
     @action(detail=True, methods=["get"], url_path="ledger")
     def ledger(self, request, **kwargs):
@@ -326,7 +372,66 @@ class SalesInvoiceViewSet(viewsets.ModelViewSet):
 
     @swagger_auto_schema(operation_description=SALES_PERMISSION_NOTE)
     def destroy(self, request, *args, **kwargs):
-        return super().destroy(request, *args, **kwargs)
+        invoice = self.get_object()
+
+        # Reverse the customer's credit_balance if this was a Credit invoice
+        if invoice.customer and invoice.payment_term == 'Credit':
+            invoice.customer.credit_balance -= invoice.balance_due
+            invoice.customer.save(update_fields=['credit_balance'])
+
+        invoice.soft_delete()
+
+        return Response(
+            {"message": "Invoice moved to trash. Customer balance adjusted."},
+            status=drf_status.HTTP_200_OK
+        )
+
+    @swagger_auto_schema(operation_description=SALES_PERMISSION_NOTE)
+    @action(detail=False, methods=['get'], url_path='trash')
+    def trash(self, request):
+        deleted_invoices = SalesInvoice.all_objects.filter(is_deleted=True)
+        page = self.paginate_queryset(deleted_invoices)
+        serializer = self.get_serializer(page, many=True)
+        return self.get_paginated_response(serializer.data)
+
+    @swagger_auto_schema(operation_description=SALES_PERMISSION_NOTE)
+    @action(detail=True, methods=['post'], url_path='restore')
+    def restore(self, request, pk=None):
+        invoice = SalesInvoice.all_objects.filter(
+            id=pk, is_deleted=True
+        ).first()
+        if not invoice:
+            return Response(
+                {"error": "Not found in trash."},
+                status=drf_status.HTTP_404_NOT_FOUND
+            )
+
+        # Re-apply the customer's credit_balance if this was a Credit invoice
+        if invoice.customer and invoice.payment_term == 'Credit':
+            invoice.customer.credit_balance += invoice.balance_due
+            invoice.customer.save(update_fields=['credit_balance'])
+
+        invoice.restore()
+        return Response({"message": "Invoice restored, balance re-applied."})
+
+    @swagger_auto_schema(operation_description=SALES_PERMISSION_NOTE)
+    @action(detail=True, methods=['delete'], url_path='permanent-delete')
+    def permanent_delete(self, request, pk=None):
+        if not request.user.is_superuser:
+            return Response(
+                {"error": "Only superuser can permanently delete."},
+                status=drf_status.HTTP_403_FORBIDDEN
+            )
+        invoice = SalesInvoice.all_objects.filter(
+            id=pk, is_deleted=True
+        ).first()
+        if not invoice:
+            return Response(
+                {"error": "Not found in trash."},
+                status=drf_status.HTTP_404_NOT_FOUND
+            )
+        invoice.delete()  # actual hard delete via Django's default
+        return Response({"message": "Permanently deleted."})
 
 
 class SalesItemViewSet(viewsets.ModelViewSet):

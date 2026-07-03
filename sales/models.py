@@ -5,9 +5,10 @@ Sales module data models: customers, invoices, and line items.
 from decimal import Decimal
 from django.db import models
 from django.db import transaction
+from sales.base_models import SoftDeleteModel
 
 
-class Customer(models.Model):
+class Customer(SoftDeleteModel):
     """Customer master record."""
 
     CUSTOMER_TYPE_CHOICES = (
@@ -67,7 +68,7 @@ class Customer(models.Model):
         super().save(*args, **kwargs)
 
 
-class SalesInvoice(models.Model):
+class SalesInvoice(SoftDeleteModel):
     """Sales invoice header linked to a customer."""
 
     customer = models.ForeignKey(
