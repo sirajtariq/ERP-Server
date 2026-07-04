@@ -22,6 +22,7 @@ from sales.serializers import (
     CustomerListSerializer,
     CustomerSerializer,
     PaymentReceivedSerializer,
+    SalesInvoiceListSerializer,
     SalesInvoiceSerializer,
     SalesItemSerializer,
 )
@@ -44,10 +45,10 @@ class CustomerViewSet(viewsets.ModelViewSet):
     ordering_fields = "__all__"
     ordering = ["-created_at"]
 
-    def get_serializer_class(self):
-        if self.action == "list":
-            return CustomerListSerializer
-        return CustomerSerializer
+    # def get_serializer_class(self):
+    #     if self.action == "list":
+    #         return CustomerListSerializer
+    #     return CustomerSerializer
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -159,14 +160,52 @@ class CustomerViewSet(viewsets.ModelViewSet):
         customer.delete()  # actual hard delete via Django's default
         return Response({"message": "Permanently deleted."})
 
+    @swagger_auto_schema(
+        operation_description="Return full customer ledger with summary, transactions, and payment details.",
+        manual_parameters=[
+            openapi.Parameter(
+                "from", openapi.IN_QUERY,
+                description="Start date for filtering (YYYY-MM-DD)",
+                type=openapi.TYPE_STRING,
+            ),
+            openapi.Parameter(
+                "to", openapi.IN_QUERY,
+                description="End date for filtering (YYYY-MM-DD)",
+                type=openapi.TYPE_STRING,
+            ),
+        ]
+    )
     @action(detail=True, methods=["get"], url_path="ledger")
     def ledger(self, request, **kwargs):
         """Return full customer ledger with summary, transactions, and payment details."""
         customer = self.get_object()
-        opening_credit = float(customer.opening_credit or 0)
+        
+        from_date = request.query_params.get('from')
+        to_date = request.query_params.get('to')
+        
+        if from_date and to_date:
+            prior_invoices = customer.invoices.filter(status='Saved', date__lt=from_date)
+            prior_payments = customer.payments.filter(date__lt=from_date)
+            balance_before_range = Decimal(str(customer.opening_credit or '0.00'))
+            for inv in prior_invoices:
+                balance_before_range += inv.net_total
+            for pay in prior_payments:
+                balance_before_range -= pay.amount_received
+            for inv in prior_invoices:
+                balance_before_range -= inv.advance_applied
+            opening_credit_for_range = balance_before_range
+            opening_desc = "Balance Brought Forward"
+            
+            invoices = customer.invoices.filter(status="Saved", date__range=[from_date, to_date]).order_by("date", "id")
+            payments = customer.payments.filter(date__range=[from_date, to_date]).order_by("date", "id")
+        else:
+            opening_credit_for_range = Decimal(str(customer.opening_credit or '0.00'))
+            opening_desc = "Opening Balance"
+            
+            invoices = customer.invoices.filter(status="Saved").order_by("date", "id")
+            payments = customer.payments.all().order_by("date", "id")
 
-        invoices = customer.invoices.filter(status="Saved").order_by("date", "id")
-        payments = customer.payments.all().order_by("date", "id")
+        opening_credit = float(opening_credit_for_range)
 
         # net_total is a Python @property, so we calculate aggregates in memory.
         all_invoices = list(
@@ -192,12 +231,14 @@ class CustomerViewSet(viewsets.ModelViewSet):
         ledger_rows = []
 
         # opening entry
-        if opening_credit > 0:
+        if opening_credit != 0:
             opening_date = customer.created_at.date() if customer.created_at else None
             ledger_rows.append({
                 "date": opening_date.isoformat() if opening_date else None,
                 "voucher": "OPENING",
-                "description": "Opening Balance",
+                "description": opening_desc,
+                "referenceType": None,
+                "referenceId": None,
                 "debit": opening_credit,
                 "credit": 0,
                 "balance": 0,
@@ -211,6 +252,8 @@ class CustomerViewSet(viewsets.ModelViewSet):
                 "date": inv.date.isoformat() if inv.date else None,
                 "voucher": inv.invoice_number,
                 "description": f"Invoice - {inv.payment_term}",
+                "referenceType": "invoice",
+                "referenceId": inv.id,
                 "debit": net,
                 "credit": 0,
                 "balance": 0,
@@ -222,6 +265,8 @@ class CustomerViewSet(viewsets.ModelViewSet):
                     "date": inv.date.isoformat() if inv.date else None,
                     "voucher": f"ADV-{inv.invoice_number}",
                     "description": "Advance Applied",
+                    "referenceType": "invoice",
+                    "referenceId": inv.id,
                     "debit": 0,
                     "credit": float(inv.advance_applied),
                     "balance": 0,
@@ -238,6 +283,8 @@ class CustomerViewSet(viewsets.ModelViewSet):
                 "date": pay.date.isoformat() if pay.date else None,
                 "voucher": pay.receipt_number,
                 "description": description,
+                "referenceType": "payment",
+                "referenceId": pay.id,
                 "debit": 0,
                 "credit": float(pay.amount_received),
                 "balance": 0,
@@ -289,7 +336,15 @@ class CustomerViewSet(viewsets.ModelViewSet):
         for row in ledger_rows:
             row.pop('_sort_ts', None)
 
+        customer_info = {
+            "customerId": customer.customer_id,
+            "customerName": customer.customer_name,
+            "phone": customer.phone,
+            "customerType": customer.customer_type,
+        }
+
         return Response({
+            "customer": customer_info,
             "summary": summary,
             "ledger": ledger_rows,
             "finalPaymentDetails": final_payment_details,
@@ -342,6 +397,11 @@ class SalesInvoiceViewSet(viewsets.ModelViewSet):
     )
     serializer_class = SalesInvoiceSerializer
     permission_classes = [IsSalesUser]
+
+    def get_serializer_class(self):
+        if self.action == "list":
+            return SalesInvoiceListSerializer
+        return SalesInvoiceSerializer
     pagination_class = CustomPageNumberPagination
     filter_backends = [OrderingFilter]
     ordering_fields = "__all__"
@@ -350,9 +410,17 @@ class SalesInvoiceViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         qs = super().get_queryset()
         name = self.request.query_params.get("name")
+        invoice_number = self.request.query_params.get("invoice_number")
+        customer_id = self.request.query_params.get("customer_id")
         customer_type = self.request.query_params.get("type")
+
         if name:
             qs = qs.filter(customer__customer_name__icontains=name)
+        if invoice_number:
+            qs = qs.filter(invoice_number__icontains=invoice_number)
+        if customer_id:
+            qs = qs.filter(customer__customer_id=customer_id)
+
         if customer_type == 'walkin':
             qs = qs.filter(customer__isnull=True)
         elif customer_type == 'loyal':
@@ -366,6 +434,16 @@ class SalesInvoiceViewSet(viewsets.ModelViewSet):
                 "name", openapi.IN_QUERY,
                 description="Search invoices by customer name (case-insensitive, partial match)",
                 type=openapi.TYPE_STRING,
+            ),
+            openapi.Parameter(
+                "invoice_number", openapi.IN_QUERY,
+                description="Search invoices by invoice number (case-insensitive, partial match)",
+                type=openapi.TYPE_STRING,
+            ),
+            openapi.Parameter(
+                "customer_id", openapi.IN_QUERY,
+                description="Search invoices by customer_id (exact match)",
+                type=openapi.TYPE_INTEGER,
             ),
             openapi.Parameter(
                 "page", openapi.IN_QUERY,

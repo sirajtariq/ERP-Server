@@ -177,9 +177,7 @@ class PaymentReceived(SoftDeleteModel):
     receipt_number = models.CharField(max_length=50, unique=True, blank=True)
     amount_received = models.DecimalField(max_digits=12, decimal_places=2)
     balance_after = models.DecimalField(max_digits=12, decimal_places=2)
-    method = models.CharField(
-        max_length=20, choices=PAYMENT_METHOD_CHOICES, default='Cash'
-    )
+    method = models.CharField(max_length=50, default='Cash')
     notes = models.TextField(blank=True, null=True)
     date = models.DateField(null=True, blank=True)
     applied_to_invoice = models.DecimalField(max_digits=12, decimal_places=2, default=0)
