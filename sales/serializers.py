@@ -87,14 +87,19 @@ class CustomerSerializer(serializers.ModelSerializer):
     taxNumber = serializers.CharField(source="tax_number", required=False, allow_null=True,allow_blank=True)
     creditBalance = serializers.DecimalField(source="credit_balance", max_digits=12, decimal_places=2, read_only=True)
     advanceBalance = serializers.DecimalField(source="advance_balance", max_digits=12, decimal_places=2, read_only=True)
+    totalPaid = serializers.SerializerMethodField()
     createdAt = serializers.DateTimeField(source="created_at", read_only=True)
     updatedAt = serializers.DateTimeField(source="updated_at", read_only=True)
     invoices = CustomerInvoiceNestedSerializer(many=True, read_only=True)
 
     class Meta:
         model = Customer
-        fields = ["id", "customerId", "customerName", "customerType", "Phone", "email", "Address", "openingCredit", "openingNote", "taxNumber", "creditBalance", "advanceBalance", "createdAt", "updatedAt", "invoices"]
-        read_only_fields = ["id", "customerId", "creditBalance", "advanceBalance", "createdAt", "updatedAt", "invoices"]
+        fields = ["id", "customerId", "customerName", "customerType", "Phone", "email", "Address", "openingCredit", "openingNote", "taxNumber", "creditBalance", "advanceBalance", "totalPaid", "createdAt", "updatedAt", "invoices"]
+        read_only_fields = ["id", "customerId", "creditBalance", "advanceBalance","totalPaid", "createdAt", "updatedAt", "invoices"]
+
+    def get_totalPaid(self, obj):
+        result = obj.payments.aggregate(total=Sum("amount_received"))
+        return float(result["total"] or 0)
 
 
 class SalesItemSerializer(serializers.ModelSerializer):
@@ -117,10 +122,69 @@ class SalesItemNestedSerializer(serializers.ModelSerializer):
         read_only_fields = ["id", "total"]
 
 
+def compute_payment_status(invoice):
+    """
+    Shared payment-status logic for both SalesInvoiceListSerializer
+    and SalesInvoiceSerializer. Uses a 0.01 tolerance to absorb
+    Decimal rounding noise from tax calculations.
+    """
+    tolerance = Decimal('0.01')
+    pending = invoice.balance_due
+    paid = invoice.paid_amount
+
+    if pending > tolerance and paid == 0:
+        return "Unpaid"
+    if pending > tolerance and paid > 0:
+        return "Partial"
+    if invoice.customer and invoice.customer.advance_balance > 0:
+        return "Advance"
+    return "Paid"
+
+
+class SalesInvoiceListSerializer(serializers.ModelSerializer):
+    """Lightweight serializer for the invoice list table (no nested items/customer)."""
+
+    invoiceNumber = serializers.CharField(source='invoice_number', read_only=True)
+    customerName = serializers.SerializerMethodField()
+    total = serializers.DecimalField(source='net_total', max_digits=12, decimal_places=2, read_only=True)
+    paid = serializers.DecimalField(source='paid_amount', max_digits=12, decimal_places=2, read_only=True)
+    pending = serializers.SerializerMethodField()
+    paymentStatus = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SalesInvoice
+        fields = [
+            'id',
+            'invoiceNumber',
+            'customerName',
+            'total',
+            'paid',
+            'pending',
+            'paymentStatus',
+            'date',
+        ]
+        read_only_fields = fields
+
+    def get_customerName(self, obj):
+        return obj.customer.customer_name if obj.customer else None
+
+    def get_pending(self, obj):
+        value = obj.balance_due
+        if abs(value) < Decimal('0.01'):
+            value = Decimal('0.00')
+        else:
+            value = value.quantize(Decimal('0.01'))
+        return str(value)
+
+    def get_paymentStatus(self, obj):
+        return compute_payment_status(obj)
+
+
 class SalesInvoiceSerializer(serializers.ModelSerializer):
     items = SalesItemNestedSerializer(many=True)
-    customer_data = CustomerSerializer(source='customer', read_only=True)
-    
+    customer = serializers.SlugRelatedField(slug_field='customer_id',queryset=Customer.objects.all(),required=False,allow_null=True) 
+    customer_data = CustomerListSerializer(source='customer', read_only=True)
+    paymentStatus = serializers.SerializerMethodField()
     subtotal = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     total_line_discount = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     tax_amount = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
@@ -143,6 +207,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             "vat_percentage",
             "invoice_discount",
             "status",
+            "paymentStatus",
             "items",
             "subtotal",
             "total_line_discount",
@@ -161,8 +226,12 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             "tax_amount", 
             "net_total", 
             "balance_due",
-            "advance_applied"
+            "advance_applied",
+            "paymentStatus",
         ]
+
+    def get_paymentStatus(self, obj):
+        return compute_payment_status(obj)
 
     def validate(self, attrs):
         customer = attrs.get('customer')
@@ -261,6 +330,10 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
 class PaymentReceivedSerializer(serializers.ModelSerializer):
     """Serializer for daily income / payment received records."""
 
+    customer = serializers.SlugRelatedField(
+        slug_field='customer_id',
+        queryset=Customer.objects.all()
+    )
     customerName = serializers.CharField(
         source='customer.customer_name', read_only=True
     )

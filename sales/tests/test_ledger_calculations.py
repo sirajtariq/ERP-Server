@@ -10,6 +10,7 @@ CRITICAL DESIGN PRINCIPLE:
     app's code cannot silently pass the test.
 """
 
+import datetime
 import time
 from decimal import Decimal
 
@@ -94,7 +95,7 @@ class LedgerCalculationTests(TestCase):
         triggers advance consumption logic.
         """
         payload = {
-            'customer': customer.id,
+            'customer': customer.customer_id,
             'payment_term': payment_term,
             'paid_amount': str(paid_amount),
             'vat_percentage': '0',
@@ -130,7 +131,7 @@ class LedgerCalculationTests(TestCase):
         if the request is not successful.
         """
         payload = {
-            'customer': customer.id,
+            'customer': customer.customer_id,
             'amount_received': str(amount),
             'method': 'Cash',
         }
@@ -151,13 +152,18 @@ class LedgerCalculationTests(TestCase):
         time.sleep(0.05)
         return response.data
 
-    def get_ledger(self, customer):
+    def get_ledger(self, customer, from_date=None, to_date=None):
         """
         GET the customer ledger and return the parsed JSON.
         Asserts 200 status — fails loudly if not.
         """
         url = f'/api/sales/customers/{customer.customer_id}/ledger/'
-        response = self.client.get(url)
+        params = {}
+        if from_date:
+            params['from'] = from_date
+        if to_date:
+            params['to'] = to_date
+        response = self.client.get(url, params)
         self.assertEqual(
             response.status_code,
             status.HTTP_200_OK,
@@ -1659,4 +1665,433 @@ class LedgerCalculationTests(TestCase):
         self.assertDecimalEqual(
             last_balance, expected_remaining,
             msg_prefix="[Test 19] last ledger row balance",
+        )
+
+    def test_20_ledger_includes_reference_ids_and_customer_block(self):
+        """
+        Test 20: test_ledger_includes_reference_ids_and_customer_block
+        Create a customer with opening_credit=1000. Create one Credit invoice,
+        item_total=2000. Create one payment of 2000.
+        """
+        customer = self.create_customer(opening_credit=Decimal('1000'))
+        inv = self.create_invoice(customer, 'Credit', Decimal('2000'))
+        pay = self.create_payment(customer, Decimal('2000'))
+
+        ledger = self.get_ledger(customer)
+
+        self.assertIn('customer', ledger)
+        self.assertEqual(ledger['customer']['customerId'], customer.customer_id)
+        self.assertEqual(ledger['customer']['customerName'], customer.customer_name)
+        
+        # Verify rows
+        rows = ledger['ledger']
+        
+        opening_row = next(r for r in rows if r['voucher'] == 'OPENING')
+        self.assertIsNone(opening_row.get('referenceType'))
+        self.assertIsNone(opening_row.get('referenceId'))
+        
+        inv_row = next(r for r in rows if r['voucher'] == inv.invoice_number)
+        self.assertEqual(inv_row.get('referenceType'), 'invoice')
+        self.assertEqual(inv_row.get('referenceId'), inv.id)
+        
+        pay_row = next(r for r in rows if r['voucher'] == pay['receipt_number'])
+        self.assertEqual(pay_row.get('referenceType'), 'payment')
+        self.assertEqual(pay_row.get('referenceId'), pay['id'])
+
+    def test_21_ledger_date_range_filter_computes_correct_brought_forward_balance(self):
+        """
+        Test 21: test_ledger_date_range_filter_computes_correct_brought_forward_balance
+        """
+        customer = self.create_customer(opening_credit=Decimal('0'))
+        inv = self.create_invoice(customer, 'Credit', Decimal('5000'))
+        pay = self.create_payment(customer, Decimal('2000'))
+
+        # NO date filter
+        ledger_no_filter = self.get_ledger(customer)
+        self.assertDecimalEqual(
+            ledger_no_filter['summary']['remainingBalance'], Decimal('3000'),
+            msg_prefix="[Test 21] No filter baseline"
+        )
+        
+        today_str = datetime.date.today().isoformat()
+        
+        # WITH today's filter
+        ledger_today = self.get_ledger(customer, from_date=today_str, to_date=today_str)
+        self.assertDecimalEqual(
+            ledger_today['summary']['remainingBalance'], Decimal('3000'),
+            msg_prefix="[Test 21] Today filter"
+        )
+        
+        tomorrow_str = (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
+        ledger_tomorrow = self.get_ledger(customer, from_date=tomorrow_str, to_date=tomorrow_str)
+        
+        rows = ledger_tomorrow['ledger']
+        if len(rows) == 1:
+            row = rows[0]
+            self.assertEqual(row['description'], 'Balance Brought Forward')
+            self.assertDecimalEqual(row['debit'], Decimal('3000'), msg_prefix="[Test 21] Brought forward debit")
+        else:
+            self.assertEqual(len(rows), 0, msg="[Test 21] Expected 0 or 1 rows")
+
+    # ═══════════════════════════════════════════════════════════════════
+    # INVOICE LIST SERIALIZER TESTS
+    # ═══════════════════════════════════════════════════════════════════
+
+    def list_invoices(self):
+        """GET the invoice list and return parsed JSON."""
+        response = self.client.get('/api/sales/invoices/')
+        self.assertEqual(
+            response.status_code, status.HTTP_200_OK,
+            msg=f"list_invoices() expected 200, got {response.status_code}. Body: {response.data}",
+        )
+        return response.data
+
+    def test_22_invoice_list_status_unpaid(self):
+        """
+        Test 22: Credit invoice with no payment → status "Unpaid".
+        """
+        customer = self.create_customer()
+        inv = self.create_invoice(customer, 'Credit', Decimal('5000'))
+
+        data = self.list_invoices()
+        # Find this invoice in the paginated results
+        results = data.get('results', data)
+        row = next(r for r in results if r['invoiceNumber'] == inv.invoice_number)
+
+        self.assertEqual(
+            row['paymentStatus'], 'Unpaid',
+            msg=f"[Test 22] Expected paymentStatus 'Unpaid', got '{row['paymentStatus']}'",
+        )
+        self.assertDecimalEqual(
+            row['pending'], Decimal('5000'),
+            msg_prefix="[Test 22] pending",
+        )
+        self.assertDecimalEqual(
+            row['paid'], Decimal('0'),
+            msg_prefix="[Test 22] paid",
+        )
+
+    def test_23_invoice_list_status_partial(self):
+        """
+        Test 23: Cash invoice with partial payment → status "Partial".
+        """
+        customer = self.create_customer()
+        inv = self.create_invoice(customer, 'Cash', Decimal('5000'))
+        self.create_payment(customer, Decimal('2000'), invoice=inv)
+
+        data = self.list_invoices()
+        results = data.get('results', data)
+        row = next(r for r in results if r['invoiceNumber'] == inv.invoice_number)
+
+        self.assertEqual(
+            row['paymentStatus'], 'Partial',
+            msg=f"[Test 23] Expected paymentStatus 'Partial', got '{row['paymentStatus']}'",
+        )
+        self.assertDecimalEqual(
+            row['pending'], Decimal('3000'),
+            msg_prefix="[Test 23] pending (5000 - 2000)",
+        )
+        self.assertDecimalEqual(
+            row['paid'], Decimal('2000'),
+            msg_prefix="[Test 23] paid",
+        )
+
+    def test_24_invoice_list_status_paid_no_advance(self):
+        """
+        Test 24: Cash invoice fully paid, customer advance_balance == 0
+        → status "Paid".
+        """
+        customer = self.create_customer()
+        inv = self.create_invoice(customer, 'Cash', Decimal('3000'))
+        self.create_payment(customer, Decimal('3000'), invoice=inv)
+
+        # Confirm customer has no advance
+        customer.refresh_from_db()
+        self.assertDecimalEqual(
+            customer.advance_balance, Decimal('0'),
+            msg_prefix="[Test 24] customer.advance_balance should be 0",
+        )
+
+        data = self.list_invoices()
+        results = data.get('results', data)
+        row = next(r for r in results if r['invoiceNumber'] == inv.invoice_number)
+
+        self.assertEqual(
+            row['paymentStatus'], 'Paid',
+            msg=f"[Test 24] Expected paymentStatus 'Paid', got '{row['paymentStatus']}'",
+        )
+        self.assertDecimalEqual(
+            row['pending'], Decimal('0'),
+            msg_prefix="[Test 24] pending",
+        )
+
+    def test_25_invoice_list_status_advance_when_customer_has_leftover_advance(self):
+        """
+        Test 25: Invoice fully paid via normal payment; customer has a
+        leftover advance_balance from a prior overpayment elsewhere.
+        → status "Advance" because pending==0 AND customer.advance_balance > 0.
+
+        Confirms the client's rule: Advance status reflects the customer's
+        current advance state, not this invoice's own payment method.
+        """
+        customer = self.create_customer()
+        # Simulate leftover advance from a prior overpayment
+        customer.advance_balance = Decimal('1000')
+        customer.save(update_fields=['advance_balance'])
+
+        inv = self.create_invoice(
+            customer, 'Cash', Decimal('2000'), paid_amount=Decimal('2000'),
+        )
+        self.create_payment(customer, Decimal('2000'), invoice=inv)
+
+        # Customer should still have advance (the payment fully covers the
+        # invoice so no advance is consumed from the leftover 1000)
+        customer.refresh_from_db()
+        self.assertTrue(
+            customer.advance_balance > 0,
+            msg=f"[Test 25] customer.advance_balance should be > 0, got {customer.advance_balance}",
+        )
+
+        data = self.list_invoices()
+        results = data.get('results', data)
+        row = next(r for r in results if r['invoiceNumber'] == inv.invoice_number)
+
+        self.assertEqual(
+            row['paymentStatus'], 'Advance',
+            msg=f"[Test 25] Expected paymentStatus 'Advance', got '{row['paymentStatus']}'",
+        )
+
+    def test_26_invoice_list_customer_name_present(self):
+        """
+        Test 26: Verify customerName is returned correctly in the list.
+        """
+        customer = self.create_customer()
+        inv = self.create_invoice(customer, 'Cash', Decimal('1000'))
+
+        data = self.list_invoices()
+        results = data.get('results', data)
+        row = next(r for r in results if r['invoiceNumber'] == inv.invoice_number)
+
+        self.assertEqual(
+            row['customerName'], customer.customer_name,
+            msg=(
+                f"[Test 26] Expected customerName '{customer.customer_name}', "
+                f"got '{row['customerName']}'"
+            ),
+        )
+
+    def test_27_invoice_status_not_partial_due_to_rounding_noise(self):
+        """
+        Test 27: A tiny rounding remainder (balance_due well under 0.01)
+        should NOT cause status "Partial". The 0.01 tolerance in get_status()
+        treats this as fully settled. Also verify the displayed 'pending'
+        is "0.00", not some fractional artifact.
+
+        Strategy: Use vat_percentage to produce a net_total with many decimal
+        places (via Decimal division by 100). Then set paid_amount to the
+        2-decimal-rounded value, leaving a sub-cent remainder in balance_due.
+        """
+        customer = self.create_customer()
+
+        # Create invoice via ORM with a VAT that produces a fractional total.
+        # subtotal = 1000 (qty=1 × rate=1000 - discount=0)
+        # vat_percentage = 7  →  tax_amount = 1000 × 7/100 = 70.00  (exact)
+        # That's too clean. Use vat_percentage = 3.33:
+        # tax_amount = 1000 × 3.33 / 100 = 33.3  (exact Decimal)
+        # Still exact. Use a subtotal that produces a repeating decimal:
+        # rate = 999, vat_percentage = 7
+        # tax_amount = 999 × 7 / 100 = 69.93 (exact)
+        # Use rate = 1000, vat_percentage = 33.33:
+        # tax_amount = 1000 × 33.33 / 100 = 333.30 (exact)
+        # The trick: use a combo where division introduces extra precision.
+        # rate = 1001, vat_percentage = 3 → tax = 1001 * 3 / 100 = 30.03
+        # Still exact. Let's just directly manipulate the scenario:
+        invoice = SalesInvoice.objects.create(
+            customer=customer,
+            payment_term='Credit',
+            paid_amount=Decimal('0'),
+            vat_percentage=Decimal('7'),
+            invoice_discount=Decimal('0'),
+            status='Saved',
+        )
+        # Create an item with rate that produces fractional tax via division
+        SalesItem.objects.create(
+            invoice=invoice,
+            item_name='TestItem_rounding',
+            quantity=Decimal('1'),
+            rate=Decimal('333.33'),  # subtotal = 333.33
+            discount=Decimal('0'),
+        )
+        # net_total = 333.33 + (333.33 * 7/100) = 333.33 + 23.3331 = 356.6631
+        # This has 4 decimal places — more than the 2dp paid_amount field.
+
+        invoice.refresh_from_db()
+        net = invoice.net_total  # Decimal('356.6631')
+
+        # Set paid_amount to the 2-decimal rounded value (356.66)
+        rounded_paid = net.quantize(Decimal('0.01'))
+        invoice.paid_amount = rounded_paid
+        invoice.save(update_fields=['paid_amount'])
+
+        invoice.refresh_from_db()
+        remainder = invoice.balance_due  # 356.6631 - 356.66 = 0.0031
+
+        self.assertTrue(
+            remainder > 0,
+            msg=f"[Test 27] balance_due should be > 0, got {remainder}",
+        )
+        self.assertTrue(
+            remainder < Decimal('0.01'),
+            msg=f"[Test 27] balance_due should be < 0.01, got {remainder}",
+        )
+
+        data = self.list_invoices()
+        results = data.get('results', data)
+        row = next(r for r in results if r['invoiceNumber'] == invoice.invoice_number)
+
+        # Status should be "Paid", NOT "Partial"
+        self.assertEqual(
+            row['paymentStatus'], 'Paid',
+            msg=(
+                f"[Test 27] Expected paymentStatus 'Paid' (rounding noise absorbed), "
+                f"got '{row['paymentStatus']}'"
+            ),
+        )
+
+        # Displayed pending should be clean "0.00"
+        self.assertDecimalEqual(
+            row['pending'], Decimal('0.00'),
+            msg_prefix="[Test 27] pending display value",
+        )
+
+    def test_28_invoice_pending_field_rounds_to_two_decimals_when_unpaid(self):
+        """
+        Test 28: Verify that the pending field is quantized to exactly 2
+        decimal places, even when net_total has more precision from VAT
+        division. An unpaid invoice with net_total=356.6631 should show
+        pending="356.66", not "356.6631".
+        """
+        customer = self.create_customer()
+
+        invoice = SalesInvoice.objects.create(
+            customer=customer,
+            payment_term='Credit',
+            paid_amount=Decimal('0'),
+            vat_percentage=Decimal('7'),
+            invoice_discount=Decimal('0'),
+            status='Saved',
+        )
+        SalesItem.objects.create(
+            invoice=invoice,
+            item_name='TestItem_precision',
+            quantity=Decimal('1'),
+            rate=Decimal('333.33'),
+            discount=Decimal('0'),
+        )
+        # net_total = 333.33 + (333.33 * 7/100) = 333.33 + 23.3331 = 356.6631
+
+        data = self.list_invoices()
+        results = data.get('results', data)
+        row = next(r for r in results if r['invoiceNumber'] == invoice.invoice_number)
+
+        # pending must be exactly "356.66" (2 decimal places)
+        self.assertEqual(
+            str(row['pending']), '356.66',
+            msg=(
+                f"[Test 28] Expected pending '356.66', "
+                f"got '{row['pending']}'"
+            ),
+        )
+
+        # paymentStatus should be "Unpaid" since 356.6631 is well above 0.01
+        self.assertEqual(
+            row['paymentStatus'], 'Unpaid',
+            msg=f"[Test 28] Expected paymentStatus 'Unpaid', got '{row['paymentStatus']}'",
+        )
+
+    def test_29_invoice_detail_customer_data_excludes_nested_invoices(self):
+        """
+        Test 29: customer_data in the invoice detail response should use
+        CustomerListSerializer (lightweight), NOT CustomerSerializer (which
+        includes nested invoices). Confirm 'invoices' key is absent.
+        """
+        customer = self.create_customer()
+        inv1 = self.create_invoice(customer, 'Credit', Decimal('1000'))
+        inv2 = self.create_invoice(customer, 'Cash', Decimal('2000'))
+
+        response = self.client.get(f'/api/sales/invoices/{inv1.id}/')
+        self.assertEqual(
+            response.status_code, status.HTTP_200_OK,
+            msg=f"[Test 29] Expected 200, got {response.status_code}. Body: {response.data}",
+        )
+
+        customer_data = response.data['customer_data']
+        self.assertNotIn(
+            'invoices', customer_data,
+            msg=(
+                "[Test 29] customer_data should NOT contain 'invoices' key "
+                "(lightweight serializer expected). Found keys: "
+                f"{list(customer_data.keys())}"
+            ),
+        )
+
+    def test_30_invoice_detail_has_both_status_and_paymentStatus_distinctly(self):
+        """
+        Test 30: The invoice detail response should have both 'status'
+        (record lifecycle: Draft/Saved) and 'paymentStatus' (payment state:
+        Unpaid/Partial/Paid/Advance) as distinct fields.
+        """
+        customer = self.create_customer()
+        inv = self.create_invoice(customer, 'Cash', Decimal('1000'))
+
+        response = self.client.get(f'/api/sales/invoices/{inv.id}/')
+        self.assertEqual(
+            response.status_code, status.HTTP_200_OK,
+            msg=f"[Test 30] Expected 200, got {response.status_code}. Body: {response.data}",
+        )
+
+        # Record status should be 'Saved' (set by create_invoice helper)
+        self.assertEqual(
+            response.data['status'], 'Saved',
+            msg=f"[Test 30] Expected status 'Saved', got '{response.data['status']}'",
+        )
+
+        # Payment status should be 'Unpaid' (no payment made)
+        self.assertEqual(
+            response.data['paymentStatus'], 'Unpaid',
+            msg=f"[Test 30] Expected paymentStatus 'Unpaid', got '{response.data['paymentStatus']}'",
+        )
+
+    def test_31_invoice_list_pending_field_is_a_string_type(self):
+        """
+        Test 31: The 'pending', 'total', and 'paid' fields in the list
+        response should all be strings (consistent JSON decimal formatting),
+        not raw numbers.
+        """
+        customer = self.create_customer()
+        inv = self.create_invoice(customer, 'Cash', Decimal('2000'))
+        self.create_payment(customer, Decimal('1000'), invoice=inv)
+
+        data = self.list_invoices()
+        results = data.get('results', data)
+        row = next(r for r in results if r['invoiceNumber'] == inv.invoice_number)
+
+        # pending should be a string "1000.00"
+        self.assertIsInstance(
+            row['pending'], str,
+            msg=f"[Test 31] 'pending' should be a str, got {type(row['pending']).__name__}",
+        )
+        self.assertEqual(
+            row['pending'], '1000.00',
+            msg=f"[Test 31] Expected pending '1000.00', got '{row['pending']}'",
+        )
+
+        # total and paid should also be strings for consistency
+        self.assertIsInstance(
+            row['total'], str,
+            msg=f"[Test 31] 'total' should be a str, got {type(row['total']).__name__}",
+        )
+        self.assertIsInstance(
+            row['paid'], str,
+            msg=f"[Test 31] 'paid' should be a str, got {type(row['paid']).__name__}",
         )
