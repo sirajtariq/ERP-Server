@@ -2095,3 +2095,311 @@ class LedgerCalculationTests(TestCase):
             row['paid'], str,
             msg=f"[Test 31] 'paid' should be a str, got {type(row['paid']).__name__}",
         )
+
+    def test_32_customer_id_retry_on_collision(self):
+        """
+        Test 32 — test_customer_id_retry_on_collision:
+        Test that Customer.save() recovers from an IntegrityError caused by a
+        customer_id collision, simulating the SQLite race condition.
+        We mock the internal id-lookup query so it returns a stale value on the
+        first attempt, forcing a collision, and verify the retry loop handles it.
+        """
+        from unittest.mock import patch
+        
+        # 1. Create a customer, gets some customer_id N (e.g. 4000)
+        customer1 = self.create_customer(customer_type='permanent')
+        
+        # 2. Create another customer, gets customer_id N+1
+        customer2 = self.create_customer(customer_type='permanent')
+
+        # 3. Initialize a third customer without saving it yet
+        customer3 = Customer(
+            customer_name='TestCustomer_Collision',
+            phone=f'0300{LedgerCalculationTests._phone_counter + 1:07d}',
+            customer_type='permanent'
+        )
+
+        real_filter = Customer.objects.filter
+        call_count = [0]
+
+        def fake_filter(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # Force the first save attempt to compute a stale customer_id
+                # that matches customer2's customer_id, triggering an IntegrityError
+                return real_filter(id=customer1.id)
+            # Second attempt: behave normally, will see customer2 and compute a new id
+            return real_filter(*args, **kwargs)
+
+        with patch.object(Customer.objects, 'filter', side_effect=fake_filter):
+            customer3.save()
+
+        # The mocked filter should be called twice due to the retry loop
+        self.assertEqual(call_count[0], 2)
+        
+        # Ensure customer3 successfully got a unique customer_id that is NOT customer2's
+        self.assertNotEqual(customer3.customer_id, customer2.customer_id)
+        self.assertTrue(customer3.customer_id > customer2.customer_id)
+
+    def test_33_invoice_creation_with_inline_new_walkin_customer(self):
+        """
+        Test 33: POST to /api/sales/invoices/ with customer as an inline
+        object {"customer_name": "Inline Walkin Test"}, payment_term='Cash',
+        one item with rate=1500, quantity=1.
+        Verifies that a new walk-in Customer is created on the fly and
+        linked to the invoice, and that to_representation returns the
+        customer_id (not a nested object).
+        """
+        payload = {
+            'customer': {'customer_name': 'Inline Walkin Test'},
+            'payment_term': 'Cash',
+            'paid_amount': '0',
+            'vat_percentage': '0',
+            'invoice_discount': '0',
+            'status': 'Saved',
+            'items': [{
+                'item_name': 'TestItem_InlineWalkin',
+                'quantity': '1',
+                'rate': '1500',
+                'discount': '0',
+            }],
+        }
+        response = self.client.post(
+            '/api/sales/invoices/', payload, format='json',
+        )
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_201_CREATED,
+            msg=(
+                f"[Test 33] Expected 201 but got {response.status_code}. "
+                f"Response body: {response.data}"
+            ),
+        )
+
+        # Fetch the created invoice from the DB
+        invoice = SalesInvoice.objects.get(id=response.data['id'])
+
+        # Assert customer is linked
+        self.assertIsNotNone(
+            invoice.customer,
+            msg="[Test 33] invoice.customer should not be None",
+        )
+
+        # Assert customer_name
+        self.assertEqual(
+            invoice.customer.customer_name, 'Inline Walkin Test',
+            msg=(
+                f"[Test 33] Expected customer_name 'Inline Walkin Test', "
+                f"got '{invoice.customer.customer_name}'"
+            ),
+        )
+
+        # Assert customer_type is 'walkin'
+        self.assertEqual(
+            invoice.customer.customer_type, 'walkin',
+            msg=(
+                f"[Test 33] Expected customer_type 'walkin', "
+                f"got '{invoice.customer.customer_type}'"
+            ),
+        )
+
+        # Assert customer_id is in the walk-in range (>= 8000)
+        self.assertGreaterEqual(
+            invoice.customer.customer_id, 8000,
+            msg=(
+                f"[Test 33] Walk-in customer_id should be >= 8000, "
+                f"got {invoice.customer.customer_id}"
+            ),
+        )
+
+        # Assert response.data['customer'] equals the customer_id (int),
+        # confirming to_representation returns the id, not a nested object
+        self.assertEqual(
+            response.data['customer'], invoice.customer.customer_id,
+            msg=(
+                f"[Test 33] Expected response customer={invoice.customer.customer_id}, "
+                f"got {response.data['customer']}"
+            ),
+        )
+
+    def test_34_invoice_creation_inline_walkin_rejects_credit_payment(self):
+        """
+        Test 34: POST to /api/sales/invoices/ with customer as an inline
+        object {"customer_name": "Credit Test Walkin"}, payment_term='Credit'.
+        Should be rejected with 400 because walk-in customers cannot use
+        Credit payment term.
+        """
+        payload = {
+            'customer': {'customer_name': 'Credit Test Walkin'},
+            'payment_term': 'Credit',
+            'paid_amount': '0',
+            'vat_percentage': '0',
+            'invoice_discount': '0',
+            'status': 'Saved',
+            'items': [{
+                'item_name': 'TestItem_CreditWalkin',
+                'quantity': '1',
+                'rate': '1000',
+                'discount': '0',
+            }],
+        }
+        response = self.client.post(
+            '/api/sales/invoices/', payload, format='json',
+        )
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+            msg=(
+                f"[Test 34] Expected 400 but got {response.status_code}. "
+                f"Response body: {response.data}"
+            ),
+        )
+
+    def test_35_invoice_creation_inline_object_missing_customer_name_rejected(self):
+        """
+        Test 35: POST to /api/sales/invoices/ with customer as an empty
+        object {} (or {"customer_name": ""}). Should be rejected with 400
+        with a validation error mentioning customer_name is required.
+        """
+        # Test with empty object
+        payload = {
+            'customer': {},
+            'payment_term': 'Cash',
+            'paid_amount': '0',
+            'vat_percentage': '0',
+            'invoice_discount': '0',
+            'status': 'Saved',
+            'items': [{
+                'item_name': 'TestItem_NoName',
+                'quantity': '1',
+                'rate': '500',
+                'discount': '0',
+            }],
+        }
+        response = self.client.post(
+            '/api/sales/invoices/', payload, format='json',
+        )
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+            msg=(
+                f"[Test 35a] Expected 400 for empty object, got "
+                f"{response.status_code}. Response body: {response.data}"
+            ),
+        )
+
+        # Test with blank customer_name
+        payload['customer'] = {'customer_name': ''}
+        response = self.client.post(
+            '/api/sales/invoices/', payload, format='json',
+        )
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+            msg=(
+                f"[Test 35b] Expected 400 for blank customer_name, got "
+                f"{response.status_code}. Response body: {response.data}"
+            ),
+        )
+
+    def test_36_inline_walkin_customer_with_full_optional_details(self):
+        """
+        Test 36: POST to /api/sales/invoices/ with customer as an inline
+        object containing all optional fields (phone, email, address) in
+        addition to customer_name. Assert 201 and verify all fields are
+        saved correctly on the created Customer record.
+        """
+        payload = {
+            'customer': {
+                'customer_name': 'Full Detail Walkin',
+                'phone': '03009998888',
+                'email': 'walkin@test.com',
+                'address': 'Test Street 123',
+            },
+            'payment_term': 'Cash',
+            'paid_amount': '0',
+            'vat_percentage': '0',
+            'invoice_discount': '0',
+            'status': 'Saved',
+            'items': [{
+                'item_name': 'TestItem_FullDetail',
+                'quantity': '1',
+                'rate': '500',
+                'discount': '0',
+            }],
+        }
+        response = self.client.post(
+            '/api/sales/invoices/', payload, format='json',
+        )
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_201_CREATED,
+            msg=(
+                f"[Test 36] Expected 201 but got {response.status_code}. "
+                f"Response body: {response.data}"
+            ),
+        )
+
+        # Fetch the created invoice and its customer
+        invoice = SalesInvoice.objects.get(id=response.data['id'])
+        cust = invoice.customer
+
+        self.assertIsNotNone(cust, "[Test 36] invoice.customer should not be None")
+        self.assertEqual(
+            cust.customer_name, 'Full Detail Walkin',
+            msg=f"[Test 36] customer_name mismatch: got '{cust.customer_name}'",
+        )
+        self.assertEqual(
+            cust.customer_type, 'walkin',
+            msg=f"[Test 36] customer_type mismatch: got '{cust.customer_type}'",
+        )
+        self.assertEqual(
+            cust.phone, '03009998888',
+            msg=f"[Test 36] phone mismatch: got '{cust.phone}'",
+        )
+        self.assertEqual(
+            cust.email, 'walkin@test.com',
+            msg=f"[Test 36] email mismatch: got '{cust.email}'",
+        )
+        self.assertEqual(
+            cust.address, 'Test Street 123',
+            msg=f"[Test 36] address mismatch: got '{cust.address}'",
+        )
+
+    def test_37_inline_walkin_customer_duplicate_phone_rejected(self):
+        """
+        Test 37: Create an existing customer with a known phone number,
+        then attempt to create an inline walk-in customer using the same
+        phone number. Should be rejected with 400.
+        """
+        existing = self.create_customer()
+        duplicate_phone = existing.phone  # auto-generated unique phone
+
+        payload = {
+            'customer': {
+                'customer_name': 'Duplicate Phone Walkin',
+                'phone': duplicate_phone,
+            },
+            'payment_term': 'Cash',
+            'paid_amount': '0',
+            'vat_percentage': '0',
+            'invoice_discount': '0',
+            'status': 'Saved',
+            'items': [{
+                'item_name': 'TestItem_DuplicatePhone',
+                'quantity': '1',
+                'rate': '1000',
+                'discount': '0',
+            }],
+        }
+        response = self.client.post(
+            '/api/sales/invoices/', payload, format='json',
+        )
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+            msg=(
+                f"[Test 37] Expected 400 for duplicate phone, got "
+                f"{response.status_code}. Response body: {response.data}"
+            ),
+        )

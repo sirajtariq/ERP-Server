@@ -466,7 +466,18 @@ class SalesInvoiceViewSet(viewsets.ModelViewSet):
     def list(self, request, *args, **kwargs):
         return super().list(request, *args, **kwargs)
 
-    @swagger_auto_schema(operation_description=SALES_PERMISSION_NOTE)
+    @swagger_auto_schema(
+        operation_description=(
+            SALES_PERMISSION_NOTE +
+            "\n\ncustomer field accepts EITHER an existing customer_id "
+            "(integer, e.g. 4023) OR an object to create a new walk-in "
+            "customer inline, e.g. "
+            "{\"customer_name\": \"Raza Khan\", \"phone\": \"03001234567\", "
+            "\"email\": \"raza@example.com\", \"address\": \"Main Market\"} "
+            "— only customer_name is required in the object form, the "
+            "rest are optional."
+        )
+    )
     def create(self, request, *args, **kwargs):
         return super().create(request, *args, **kwargs)
 
