@@ -466,7 +466,18 @@ class SalesInvoiceViewSet(viewsets.ModelViewSet):
     def list(self, request, *args, **kwargs):
         return super().list(request, *args, **kwargs)
 
-    @swagger_auto_schema(operation_description=SALES_PERMISSION_NOTE)
+    @swagger_auto_schema(
+        operation_description=(
+            SALES_PERMISSION_NOTE +
+            "\n\ncustomer field accepts EITHER an existing customer_id "
+            "(integer, e.g. 4023) OR an object to create a new walk-in "
+            "customer inline, e.g. "
+            "{\"customer_name\": \"Raza Khan\", \"phone\": \"03001234567\", "
+            "\"email\": \"raza@example.com\", \"address\": \"Main Market\"} "
+            "— only customer_name is required in the object form, the "
+            "rest are optional."
+        )
+    )
     def create(self, request, *args, **kwargs):
         return super().create(request, *args, **kwargs)
 
@@ -486,13 +497,14 @@ class SalesInvoiceViewSet(viewsets.ModelViewSet):
     def destroy(self, request, *args, **kwargs):
         invoice = self.get_object()
 
-        if invoice.customer and invoice.payment_term == 'Credit':
-            invoice.customer.credit_balance -= invoice.balance_due
-            invoice.customer.save(update_fields=['credit_balance'])
+        if invoice.status == 'Saved':
+            if invoice.customer and invoice.payment_term == 'Credit':
+                invoice.customer.credit_balance -= invoice.balance_due
+                invoice.customer.save(update_fields=['credit_balance'])
 
-        if invoice.customer and invoice.advance_applied > 0:
-            invoice.customer.advance_balance += invoice.advance_applied
-            invoice.customer.save(update_fields=['advance_balance'])
+            if invoice.customer and invoice.advance_applied > 0:
+                invoice.customer.advance_balance += invoice.advance_applied
+                invoice.customer.save(update_fields=['advance_balance'])
 
         invoice.soft_delete()
 
@@ -516,13 +528,14 @@ class SalesInvoiceViewSet(viewsets.ModelViewSet):
         if not invoice:
             return Response({"error": "Not found in trash."}, status=drf_status.HTTP_404_NOT_FOUND)
 
-        if invoice.customer and invoice.payment_term == 'Credit':
-            invoice.customer.credit_balance += invoice.balance_due
-            invoice.customer.save(update_fields=['credit_balance'])
+        if invoice.status == 'Saved':
+            if invoice.customer and invoice.payment_term == 'Credit':
+                invoice.customer.credit_balance += invoice.balance_due
+                invoice.customer.save(update_fields=['credit_balance'])
 
-        if invoice.customer and invoice.advance_applied > 0:
-            invoice.customer.advance_balance -= invoice.advance_applied
-            invoice.customer.save(update_fields=['advance_balance'])
+            if invoice.customer and invoice.advance_applied > 0:
+                invoice.customer.advance_balance -= invoice.advance_applied
+                invoice.customer.save(update_fields=['advance_balance'])
 
         invoice.restore()
 

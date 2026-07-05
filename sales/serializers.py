@@ -180,11 +180,88 @@ class SalesInvoiceListSerializer(serializers.ModelSerializer):
         return compute_payment_status(obj)
 
 
+class CustomerOrInlineCreateField(serializers.Field):
+    """
+    Accepts either:
+    - An existing customer's customer_id as an integer/numeric string
+      (looks up and returns that Customer instance), or
+    - A dict with at least 'customer_name' (creates a new Customer
+      with customer_type='walkin' inline, and returns that instance).
+
+    Always serializes back out as the customer's customer_id (int),
+    regardless of which input form was used to create/link it.
+    """
+
+    def to_internal_value(self, data):
+        # Case 1: existing customer, referenced by customer_id
+        if isinstance(data, (int, str)) and not isinstance(data, dict):
+            try:
+                customer_id = int(data)
+            except (TypeError, ValueError):
+                raise serializers.ValidationError(
+                    "customer must be a customer_id (integer) or an "
+                    "object with at least customer_name to create a "
+                    "new walk-in customer."
+                )
+            try:
+                return Customer.objects.get(customer_id=customer_id)
+            except Customer.DoesNotExist:
+                raise serializers.ValidationError(
+                    f"No customer found with customer_id={customer_id}."
+                )
+
+        # Case 2: inline creation of a new walk-in customer
+        if isinstance(data, dict):
+            customer_name = data.get('customer_name', '').strip()
+            if not customer_name:
+                raise serializers.ValidationError(
+                    "customer_name is required to create a new "
+                    "walk-in customer inline."
+                )
+
+            phone = data.get('phone')
+            if phone:
+                phone = str(phone).strip()
+                if Customer.objects.filter(phone=phone).exists():
+                    raise serializers.ValidationError(
+                        f"A customer with phone number '{phone}' already "
+                        f"exists. Search for them instead of creating a "
+                        f"new one, or omit the phone number."
+                    )
+            else:
+                phone = None
+
+            email = data.get('email') or None
+            address = data.get('address', '') or ''
+
+            return Customer.objects.create(
+                customer_name=customer_name,
+                customer_type='walkin',
+                phone=phone,
+                email=email,
+                address=address,
+            )
+
+        raise serializers.ValidationError(
+            "customer must be a customer_id (integer) or an object "
+            "with at least customer_name to create a new walk-in "
+            "customer."
+        )
+
+    def to_representation(self, value):
+        # value is a Customer instance — always output its customer_id
+        return value.customer_id if value else None
+
+
 class SalesInvoiceSerializer(serializers.ModelSerializer):
     items = SalesItemNestedSerializer(many=True)
-    customer = serializers.SlugRelatedField(slug_field='customer_id',queryset=Customer.objects.all(),required=False,allow_null=True) 
+    customer = CustomerOrInlineCreateField(required=False, allow_null=True)
     customer_data = CustomerListSerializer(source='customer', read_only=True)
     paymentStatus = serializers.SerializerMethodField()
+    invoiceStatus = serializers.ChoiceField(
+        source='status',
+        choices=SalesInvoice.STATUS_CHOICES,
+    )
     subtotal = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     total_line_discount = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     tax_amount = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
@@ -206,7 +283,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             "notes",
             "vat_percentage",
             "invoice_discount",
-            "status",
+            "invoiceStatus",
             "paymentStatus",
             "items",
             "subtotal",
@@ -236,50 +313,38 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         customer = attrs.get('customer')
         payment_term = attrs.get('payment_term')
-        walk_in_name = self.initial_data.get('walk_in_customer_name')
 
-        if not customer and not walk_in_name:
+        # On partial update (PATCH), fall back to existing instance values
+        # for fields not included in the request payload.
+        if self.instance:
+            if not customer:
+                customer = self.instance.customer
+            if not payment_term:
+                payment_term = self.instance.payment_term
+
+        if not customer:
             raise serializers.ValidationError(
-                "Either a customer or walk-in name is required."
+                "A customer is required — either an existing customer_id "
+                "or an object with customer_name to create a new "
+                "walk-in customer."
             )
 
-        # Check credit restriction for existing walk-in customer
-        if customer and hasattr(customer, 'customer_type') and customer.customer_type == 'walkin' and payment_term == 'Credit':
-            raise serializers.ValidationError(
-                "Walk-in customers can only pay via Cash."
-            )
-
-        # Check credit restriction for new walk-in (customer not yet created)
-        if not customer and walk_in_name and payment_term == 'Credit':
+        if customer.customer_type == 'walkin' and payment_term == 'Credit':
             raise serializers.ValidationError(
                 "Walk-in customers can only pay via Cash."
             )
 
         return attrs
 
-    def create(self, validated_data: dict) -> SalesInvoice:
-        items_data = validated_data.pop("items")
-
-        # Auto-create walk-in customer if no customer provided
-        if not validated_data.get('customer'):
-            walk_in_name = self.initial_data.get('walk_in_customer_name')
-            if walk_in_name:
-                walkin_customer = Customer.objects.create(
-                    customer_name=walk_in_name,
-                    customer_type='walkin',
-                )
-                validated_data['customer'] = walkin_customer
-
-        invoice = SalesInvoice.objects.create(**validated_data)
-        # Capture the original paid_amount from the request BEFORE advance
-        # consumption modifies it — used later for auto-PaymentReceived.
-        original_paid_amount = invoice.paid_amount
-
-        for item_data in items_data:
-            SalesItem.objects.create(invoice=invoice, **item_data)
-
-        # Advance consumption: if customer has advance_balance, apply it
-        # towards this invoice's balance_due before any credit_balance update.
+    def _apply_invoice_balance_effects(self, invoice, original_paid_amount):
+        """
+        Applies all balance-affecting side effects for an invoice that
+        has just become 'Saved' (either created directly as Saved, or
+        transitioned from Draft to Saved via update()). Must only ever
+        be called ONCE per invoice's lifecycle — calling it twice would
+        double-apply advance consumption, credit_balance changes, and
+        create a duplicate PaymentReceived record.
+        """
         if invoice.customer:
             remaining_due = invoice.balance_due
             available_advance = invoice.customer.advance_balance
@@ -294,15 +359,11 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                 invoice.customer.advance_balance -= consume_amount
                 invoice.customer.save(update_fields=['advance_balance'])
 
-        # Update credit_balance when payment_term is Credit
         if invoice.payment_term == 'Credit' and invoice.customer:
             invoice.customer.refresh_from_db(fields=['credit_balance'])
             invoice.customer.credit_balance += invoice.balance_due
             invoice.customer.save(update_fields=['credit_balance'])
 
-        # Auto-record a PaymentReceived entry for visibility in Daily Income.
-        # Only for the ORIGINAL paid_amount from the request, not the advance
-        # consumption portion (which is tracked via advance_applied instead).
         if invoice.customer and original_paid_amount > 0:
             PaymentReceived.objects.create(
                 customer=invoice.customer,
@@ -313,17 +374,38 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                 notes=f"Auto-recorded from invoice {invoice.invoice_number}",
             )
 
+    def create(self, validated_data: dict) -> SalesInvoice:
+        items_data = validated_data.pop("items")
+
+        invoice = SalesInvoice.objects.create(**validated_data)
+        original_paid_amount = invoice.paid_amount
+
+        for item_data in items_data:
+            SalesItem.objects.create(invoice=invoice, **item_data)
+
+        if invoice.status == 'Saved':
+            self._apply_invoice_balance_effects(invoice, original_paid_amount)
+
         return invoice
 
     def update(self, instance: SalesInvoice, validated_data: dict) -> SalesInvoice:
         items_data = validated_data.pop("items", None)
+        old_status = instance.status
+
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         instance.save()
+
         if items_data is not None:
             instance.items.all().delete()
             for item_data in items_data:
                 SalesItem.objects.create(invoice=instance, **item_data)
+
+        if old_status != 'Saved' and instance.status == 'Saved':
+            instance.refresh_from_db()
+            original_paid_amount = instance.paid_amount
+            self._apply_invoice_balance_effects(instance, original_paid_amount)
+
         return instance
 
 

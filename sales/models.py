@@ -3,8 +3,7 @@ Sales module data models: customers, invoices, and line items.
 """
 
 from decimal import Decimal
-from django.db import models
-from django.db import transaction
+from django.db import IntegrityError, models, transaction
 from sales.base_models import SoftDeleteModel
 
 
@@ -39,20 +38,36 @@ class Customer(SoftDeleteModel):
     def save(self, *args, **kwargs):
         is_new = not self.id
         if is_new:
-            with transaction.atomic():
-                if self.customer_type == 'walkin':
-                    start_id = 8000
-                    last = Customer.objects.select_for_update()\
-                                   .filter(customer_type='walkin')\
-                                   .order_by('-customer_id').first()
-                else:
-                    start_id = 4000
-                    last = Customer.objects.select_for_update()\
-                                   .filter(customer_type='permanent')\
-                                   .order_by('-customer_id').first()
-                self.customer_id = (last.customer_id + 1) if last else start_id
-        
-        super().save(*args, **kwargs)
+            max_attempts = 5
+            for attempt in range(max_attempts):
+                with transaction.atomic():
+                    if self.customer_type == 'walkin':
+                        start_id = 8000
+                        last = Customer.objects.filter(
+                            customer_type='walkin'
+                        ).order_by('-customer_id').first()
+                    else:
+                        start_id = 4000
+                        last = Customer.objects.filter(
+                            customer_type='permanent'
+                        ).order_by('-customer_id').first()
+
+                    self.customer_id = (last.customer_id + 1) if last else start_id
+
+                    try:
+                        # Use a savepoint so a failed insert here doesn't
+                        # poison the outer transaction/request.
+                        with transaction.atomic():
+                            super(Customer, self).save(*args, **kwargs)
+                        break  # success — exit retry loop
+                    except IntegrityError as e:
+                        if 'customer_id' in str(e) and attempt < max_attempts - 1:
+                            # Collision — loop again and recompute a fresh id
+                            continue
+                        raise  # give up after max_attempts, or it's a
+                               # different/unrelated IntegrityError
+        else:
+            super().save(*args, **kwargs)
 
 
 class SalesInvoice(SoftDeleteModel):
