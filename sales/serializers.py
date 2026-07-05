@@ -258,6 +258,10 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
     customer = CustomerOrInlineCreateField(required=False, allow_null=True)
     customer_data = CustomerListSerializer(source='customer', read_only=True)
     paymentStatus = serializers.SerializerMethodField()
+    invoiceStatus = serializers.ChoiceField(
+        source='status',
+        choices=SalesInvoice.STATUS_CHOICES,
+    )
     subtotal = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     total_line_discount = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     tax_amount = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
@@ -279,7 +283,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             "notes",
             "vat_percentage",
             "invoice_discount",
-            "status",
+            "invoiceStatus",
             "paymentStatus",
             "items",
             "subtotal",
@@ -310,6 +314,14 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         customer = attrs.get('customer')
         payment_term = attrs.get('payment_term')
 
+        # On partial update (PATCH), fall back to existing instance values
+        # for fields not included in the request payload.
+        if self.instance:
+            if not customer:
+                customer = self.instance.customer
+            if not payment_term:
+                payment_term = self.instance.payment_term
+
         if not customer:
             raise serializers.ValidationError(
                 "A customer is required — either an existing customer_id "
@@ -324,19 +336,15 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
 
         return attrs
 
-    def create(self, validated_data: dict) -> SalesInvoice:
-        items_data = validated_data.pop("items")
-
-        invoice = SalesInvoice.objects.create(**validated_data)
-        # Capture the original paid_amount from the request BEFORE advance
-        # consumption modifies it — used later for auto-PaymentReceived.
-        original_paid_amount = invoice.paid_amount
-
-        for item_data in items_data:
-            SalesItem.objects.create(invoice=invoice, **item_data)
-
-        # Advance consumption: if customer has advance_balance, apply it
-        # towards this invoice's balance_due before any credit_balance update.
+    def _apply_invoice_balance_effects(self, invoice, original_paid_amount):
+        """
+        Applies all balance-affecting side effects for an invoice that
+        has just become 'Saved' (either created directly as Saved, or
+        transitioned from Draft to Saved via update()). Must only ever
+        be called ONCE per invoice's lifecycle — calling it twice would
+        double-apply advance consumption, credit_balance changes, and
+        create a duplicate PaymentReceived record.
+        """
         if invoice.customer:
             remaining_due = invoice.balance_due
             available_advance = invoice.customer.advance_balance
@@ -351,15 +359,11 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                 invoice.customer.advance_balance -= consume_amount
                 invoice.customer.save(update_fields=['advance_balance'])
 
-        # Update credit_balance when payment_term is Credit
         if invoice.payment_term == 'Credit' and invoice.customer:
             invoice.customer.refresh_from_db(fields=['credit_balance'])
             invoice.customer.credit_balance += invoice.balance_due
             invoice.customer.save(update_fields=['credit_balance'])
 
-        # Auto-record a PaymentReceived entry for visibility in Daily Income.
-        # Only for the ORIGINAL paid_amount from the request, not the advance
-        # consumption portion (which is tracked via advance_applied instead).
         if invoice.customer and original_paid_amount > 0:
             PaymentReceived.objects.create(
                 customer=invoice.customer,
@@ -370,17 +374,38 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                 notes=f"Auto-recorded from invoice {invoice.invoice_number}",
             )
 
+    def create(self, validated_data: dict) -> SalesInvoice:
+        items_data = validated_data.pop("items")
+
+        invoice = SalesInvoice.objects.create(**validated_data)
+        original_paid_amount = invoice.paid_amount
+
+        for item_data in items_data:
+            SalesItem.objects.create(invoice=invoice, **item_data)
+
+        if invoice.status == 'Saved':
+            self._apply_invoice_balance_effects(invoice, original_paid_amount)
+
         return invoice
 
     def update(self, instance: SalesInvoice, validated_data: dict) -> SalesInvoice:
         items_data = validated_data.pop("items", None)
+        old_status = instance.status
+
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         instance.save()
+
         if items_data is not None:
             instance.items.all().delete()
             for item_data in items_data:
                 SalesItem.objects.create(invoice=instance, **item_data)
+
+        if old_status != 'Saved' and instance.status == 'Saved':
+            instance.refresh_from_db()
+            original_paid_amount = instance.paid_amount
+            self._apply_invoice_balance_effects(instance, original_paid_amount)
+
         return instance
 
 

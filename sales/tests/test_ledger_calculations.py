@@ -100,7 +100,7 @@ class LedgerCalculationTests(TestCase):
             'paid_amount': str(paid_amount),
             'vat_percentage': '0',
             'invoice_discount': '0',
-            'status': 'Saved',
+            'invoiceStatus': 'Saved',
             'items': [{
                 'item_name': 'TestItem_API',
                 'quantity': '1',
@@ -2035,9 +2035,9 @@ class LedgerCalculationTests(TestCase):
             ),
         )
 
-    def test_30_invoice_detail_has_both_status_and_paymentStatus_distinctly(self):
+    def test_30_invoice_detail_has_both_invoiceStatus_and_paymentStatus_distinctly(self):
         """
-        Test 30: The invoice detail response should have both 'status'
+        Test 30: The invoice detail response should have both 'invoiceStatus'
         (record lifecycle: Draft/Saved) and 'paymentStatus' (payment state:
         Unpaid/Partial/Paid/Advance) as distinct fields.
         """
@@ -2052,8 +2052,8 @@ class LedgerCalculationTests(TestCase):
 
         # Record status should be 'Saved' (set by create_invoice helper)
         self.assertEqual(
-            response.data['status'], 'Saved',
-            msg=f"[Test 30] Expected status 'Saved', got '{response.data['status']}'",
+            response.data['invoiceStatus'], 'Saved',
+            msg=f"[Test 30] Expected invoiceStatus 'Saved', got '{response.data['invoiceStatus']}'",
         )
 
         # Payment status should be 'Unpaid' (no payment made)
@@ -2156,7 +2156,7 @@ class LedgerCalculationTests(TestCase):
             'paid_amount': '0',
             'vat_percentage': '0',
             'invoice_discount': '0',
-            'status': 'Saved',
+            'invoiceStatus': 'Saved',
             'items': [{
                 'item_name': 'TestItem_InlineWalkin',
                 'quantity': '1',
@@ -2235,7 +2235,7 @@ class LedgerCalculationTests(TestCase):
             'paid_amount': '0',
             'vat_percentage': '0',
             'invoice_discount': '0',
-            'status': 'Saved',
+            'invoiceStatus': 'Saved',
             'items': [{
                 'item_name': 'TestItem_CreditWalkin',
                 'quantity': '1',
@@ -2268,7 +2268,7 @@ class LedgerCalculationTests(TestCase):
             'paid_amount': '0',
             'vat_percentage': '0',
             'invoice_discount': '0',
-            'status': 'Saved',
+            'invoiceStatus': 'Saved',
             'items': [{
                 'item_name': 'TestItem_NoName',
                 'quantity': '1',
@@ -2320,7 +2320,7 @@ class LedgerCalculationTests(TestCase):
             'paid_amount': '0',
             'vat_percentage': '0',
             'invoice_discount': '0',
-            'status': 'Saved',
+            'invoiceStatus': 'Saved',
             'items': [{
                 'item_name': 'TestItem_FullDetail',
                 'quantity': '1',
@@ -2384,7 +2384,7 @@ class LedgerCalculationTests(TestCase):
             'paid_amount': '0',
             'vat_percentage': '0',
             'invoice_discount': '0',
-            'status': 'Saved',
+            'invoiceStatus': 'Saved',
             'items': [{
                 'item_name': 'TestItem_DuplicatePhone',
                 'quantity': '1',
@@ -2401,5 +2401,308 @@ class LedgerCalculationTests(TestCase):
             msg=(
                 f"[Test 37] Expected 400 for duplicate phone, got "
                 f"{response.status_code}. Response body: {response.data}"
+            ),
+        )
+
+    def test_38_draft_invoice_has_zero_balance_effect(self):
+        """
+        Test 38: A Draft invoice must have ZERO financial effect — no
+        credit_balance change, no advance consumption, no PaymentReceived
+        auto-creation, and must not appear in the ledger.
+        """
+        customer = self.create_customer(opening_credit=Decimal('0'))
+
+        payload = {
+            'customer': customer.customer_id,
+            'payment_term': 'Credit',
+            'paid_amount': '500',
+            'vat_percentage': '0',
+            'invoice_discount': '0',
+            'invoiceStatus': 'Draft',
+            'items': [{
+                'item_name': 'DraftItem',
+                'quantity': '1',
+                'rate': '100',
+                'discount': '0',
+            }],
+        }
+        response = self.client.post(
+            '/api/sales/invoices/', payload, format='json',
+        )
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_201_CREATED,
+            msg=(
+                f"[Test 38] Expected 201 but got {response.status_code}. "
+                f"Response body: {response.data}"
+            ),
+        )
+
+        invoice = SalesInvoice.objects.get(id=response.data['id'])
+        customer.refresh_from_db()
+
+        # credit_balance must be untouched
+        self.assertDecimalEqual(
+            customer.credit_balance, Decimal('0'),
+            msg_prefix="[Test 38] customer.credit_balance should be 0",
+        )
+
+        # advance_balance must be untouched
+        self.assertDecimalEqual(
+            customer.advance_balance, Decimal('0'),
+            msg_prefix="[Test 38] customer.advance_balance should be 0",
+        )
+
+        # No PaymentReceived auto-created
+        from sales.models import PaymentReceived
+        self.assertEqual(
+            PaymentReceived.objects.filter(customer=customer).count(), 0,
+            msg="[Test 38] No PaymentReceived should exist for Draft invoice",
+        )
+
+        # advance_applied must be 0
+        self.assertDecimalEqual(
+            invoice.advance_applied, Decimal('0'),
+            msg_prefix="[Test 38] invoice.advance_applied should be 0",
+        )
+
+        # Ledger must not include Draft invoices
+        ledger = self.get_ledger(customer)
+        self.assertEqual(
+            ledger['summary']['totalInvoices'], 0,
+            msg="[Test 38] totalInvoices should be 0 for Draft-only",
+        )
+        self.assertEqual(
+            len(ledger['ledger']), 0,
+            msg="[Test 38] ledger array should be empty for Draft-only",
+        )
+
+    def test_39_draft_to_saved_transition_applies_balance_effects_once(self):
+        """
+        Test 39: When a Draft invoice is PATCHed to Saved, balance effects
+        (advance consumption, credit_balance update) must trigger exactly
+        once at that point. A second PATCH with invoiceStatus=Saved must
+        NOT re-apply the effects.
+        """
+        customer = self.create_customer(opening_credit=Decimal('0'))
+        customer.advance_balance = Decimal('200')
+        customer.save(update_fields=['advance_balance'])
+
+        # Create Draft invoice
+        payload = {
+            'customer': customer.customer_id,
+            'payment_term': 'Credit',
+            'paid_amount': '0',
+            'vat_percentage': '0',
+            'invoice_discount': '0',
+            'invoiceStatus': 'Draft',
+            'items': [{
+                'item_name': 'DraftToSavedItem',
+                'quantity': '1',
+                'rate': '500',
+                'discount': '0',
+            }],
+        }
+        response = self.client.post(
+            '/api/sales/invoices/', payload, format='json',
+        )
+        self.assertEqual(
+            response.status_code, status.HTTP_201_CREATED,
+            msg=f"[Test 39] Create Draft: {response.data}",
+        )
+        invoice_id = response.data['id']
+
+        # Confirm nothing changed yet
+        customer.refresh_from_db()
+        self.assertDecimalEqual(
+            customer.advance_balance, Decimal('200'),
+            msg_prefix="[Test 39] advance_balance should still be 200 after Draft",
+        )
+        self.assertDecimalEqual(
+            customer.credit_balance, Decimal('0'),
+            msg_prefix="[Test 39] credit_balance should be 0 after Draft",
+        )
+
+        # Transition Draft → Saved
+        patch_response = self.client.patch(
+            f'/api/sales/invoices/{invoice_id}/',
+            {'invoiceStatus': 'Saved'},
+            format='json',
+        )
+        self.assertEqual(
+            patch_response.status_code, status.HTTP_200_OK,
+            msg=f"[Test 39] PATCH to Saved: {patch_response.data}",
+        )
+
+        # Refresh and verify
+        invoice = SalesInvoice.objects.get(id=invoice_id)
+        customer.refresh_from_db()
+
+        # Hand-computed: advance=200 consumes into 500 balance_due,
+        # leaving 300 as credit_balance
+        self.assertDecimalEqual(
+            invoice.advance_applied, Decimal('200'),
+            msg_prefix="[Test 39] invoice.advance_applied",
+        )
+        self.assertDecimalEqual(
+            customer.advance_balance, Decimal('0'),
+            msg_prefix="[Test 39] customer.advance_balance after transition",
+        )
+        self.assertDecimalEqual(
+            customer.credit_balance, Decimal('300'),
+            msg_prefix="[Test 39] customer.credit_balance after transition",
+        )
+
+        # Ledger should show the invoice now
+        ledger = self.get_ledger(customer)
+        self.assertEqual(
+            ledger['summary']['totalInvoices'], 1,
+            msg="[Test 39] totalInvoices should be 1 after Saved",
+        )
+        # Should have both invoice debit row and advance-applied credit row
+        vouchers = [row['voucher'] for row in ledger['ledger']]
+        self.assertIn(
+            invoice.invoice_number, vouchers,
+            msg=f"[Test 39] Invoice voucher should be in ledger: {vouchers}",
+        )
+        self.assertIn(
+            f'ADV-{invoice.invoice_number}', vouchers,
+            msg=f"[Test 39] Advance Applied voucher should be in ledger: {vouchers}",
+        )
+
+        # PATCH Saved → Saved again: should NOT double-apply
+        patch2 = self.client.patch(
+            f'/api/sales/invoices/{invoice_id}/',
+            {'invoiceStatus': 'Saved'},
+            format='json',
+        )
+        self.assertEqual(
+            patch2.status_code, status.HTTP_200_OK,
+            msg=f"[Test 39] Second PATCH: {patch2.data}",
+        )
+        customer.refresh_from_db()
+        self.assertDecimalEqual(
+            customer.credit_balance, Decimal('300'),
+            msg_prefix="[Test 39] credit_balance must NOT double after re-PATCH",
+        )
+
+    def test_40_deleting_a_draft_invoice_does_not_affect_balance(self):
+        """
+        Test 40: Deleting a Draft invoice must not change any customer
+        balances (a Draft never had effects applied).
+        """
+        customer = self.create_customer(opening_credit=Decimal('0'))
+
+        payload = {
+            'customer': customer.customer_id,
+            'payment_term': 'Credit',
+            'paid_amount': '1000',
+            'vat_percentage': '0',
+            'invoice_discount': '0',
+            'invoiceStatus': 'Draft',
+            'items': [{
+                'item_name': 'DraftDeleteItem',
+                'quantity': '1',
+                'rate': '1000',
+                'discount': '0',
+            }],
+        }
+        response = self.client.post(
+            '/api/sales/invoices/', payload, format='json',
+        )
+        self.assertEqual(
+            response.status_code, status.HTTP_201_CREATED,
+            msg=f"[Test 40] Create: {response.data}",
+        )
+        invoice_id = response.data['id']
+
+        customer.refresh_from_db()
+        self.assertDecimalEqual(
+            customer.credit_balance, Decimal('0'),
+            msg_prefix="[Test 40] credit_balance before delete",
+        )
+
+        from sales.models import PaymentReceived
+        self.assertEqual(
+            PaymentReceived.objects.filter(customer=customer).count(), 0,
+            msg="[Test 40] No PaymentReceived for Draft",
+        )
+
+        # DELETE the Draft invoice
+        del_response = self.client.delete(
+            f'/api/sales/invoices/{invoice_id}/',
+        )
+        self.assertEqual(
+            del_response.status_code, status.HTTP_200_OK,
+            msg=f"[Test 40] DELETE: {del_response.data}",
+        )
+
+        customer.refresh_from_db()
+        self.assertDecimalEqual(
+            customer.credit_balance, Decimal('0'),
+            msg_prefix="[Test 40] credit_balance after deleting Draft (must stay 0)",
+        )
+
+    def test_41_invoice_detail_has_invoiceStatus_and_paymentStatus_distinctly(self):
+        """
+        Test 41: The invoice detail response should have 'invoiceStatus'
+        (not bare 'status') alongside 'paymentStatus', confirming the
+        API rename.
+        """
+        customer = self.create_customer()
+
+        payload = {
+            'customer': customer.customer_id,
+            'payment_term': 'Cash',
+            'paid_amount': '0',
+            'vat_percentage': '0',
+            'invoice_discount': '0',
+            'invoiceStatus': 'Saved',
+            'items': [{
+                'item_name': 'TestItem_StatusRename',
+                'quantity': '1',
+                'rate': '1000',
+                'discount': '0',
+            }],
+        }
+        response = self.client.post(
+            '/api/sales/invoices/', payload, format='json',
+        )
+        self.assertEqual(
+            response.status_code, status.HTTP_201_CREATED,
+            msg=f"[Test 41] Create: {response.data}",
+        )
+        invoice_id = response.data['id']
+
+        detail = self.client.get(f'/api/sales/invoices/{invoice_id}/')
+        self.assertEqual(
+            detail.status_code, status.HTTP_200_OK,
+            msg=f"[Test 41] GET: {detail.data}",
+        )
+
+        # invoiceStatus should be present and correct
+        self.assertEqual(
+            detail.data['invoiceStatus'], 'Saved',
+            msg=(
+                f"[Test 41] Expected invoiceStatus 'Saved', "
+                f"got '{detail.data.get('invoiceStatus')}'"
+            ),
+        )
+
+        # paymentStatus should be present and correct (Unpaid, no payment)
+        self.assertEqual(
+            detail.data['paymentStatus'], 'Unpaid',
+            msg=(
+                f"[Test 41] Expected paymentStatus 'Unpaid', "
+                f"got '{detail.data.get('paymentStatus')}'"
+            ),
+        )
+
+        # Bare 'status' key should NOT be in the response
+        self.assertNotIn(
+            'status', detail.data,
+            msg=(
+                "[Test 41] Bare 'status' key should not exist in response "
+                f"(renamed to 'invoiceStatus'). Keys: {list(detail.data.keys())}"
             ),
         )
