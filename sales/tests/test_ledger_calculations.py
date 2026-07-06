@@ -95,7 +95,13 @@ class LedgerCalculationTests(TestCase):
         triggers advance consumption logic.
         """
         payload = {
-            'customer': customer.customer_id,
+            'customer_data': {
+                'customer_id': customer.customer_id,
+                'customer_name': customer.customer_name,
+                'phone': customer.phone,
+                'customer_type': 'walkin',
+                'tax_number': None,
+            },
             'payment_term': payment_term,
             'paid_amount': str(paid_amount),
             'vat_percentage': '0',
@@ -2143,15 +2149,20 @@ class LedgerCalculationTests(TestCase):
 
     def test_33_invoice_creation_with_inline_new_walkin_customer(self):
         """
-        Test 33: POST to /api/sales/invoices/ with customer as an inline
-        object {"customer_name": "Inline Walkin Test"}, payment_term='Cash',
-        one item with rate=1500, quantity=1.
+        Test 33: POST to /api/sales/invoices/ with customer_data as an
+        object, payment_term='Cash', one item with rate=1500, quantity=1.
         Verifies that a new walk-in Customer is created on the fly and
         linked to the invoice, and that to_representation returns the
-        customer_id (not a nested object).
+        full nested customer data object.
         """
         payload = {
-            'customer': {'customer_name': 'Inline Walkin Test'},
+            'customer_data': {
+                'customer_id': None,
+                'customer_name': 'Inline Walkin Test',
+                'phone': '03111111111',
+                'customer_type': 'walkin',
+                'tax_number': None,
+            },
             'payment_term': 'Cash',
             'paid_amount': '0',
             'vat_percentage': '0',
@@ -2212,25 +2223,31 @@ class LedgerCalculationTests(TestCase):
             ),
         )
 
-        # Assert response.data['customer'] equals the customer_id (int),
-        # confirming to_representation returns the id, not a nested object
-        self.assertEqual(
-            response.data['customer'], invoice.customer.customer_id,
+        # Assert response.data['customer_data'] is a dict (nested object),
+        # confirming to_representation returns full customer info
+        self.assertIsInstance(
+            response.data['customer_data'], dict,
             msg=(
-                f"[Test 33] Expected response customer={invoice.customer.customer_id}, "
-                f"got {response.data['customer']}"
+                f"[Test 33] Expected response customer_data to be a dict, "
+                f"got {type(response.data['customer_data']).__name__}"
             ),
         )
 
     def test_34_invoice_creation_inline_walkin_rejects_credit_payment(self):
         """
-        Test 34: POST to /api/sales/invoices/ with customer as an inline
-        object {"customer_name": "Credit Test Walkin"}, payment_term='Credit'.
+        Test 34: POST to /api/sales/invoices/ with customer_data for a
+        new walk-in customer, payment_term='Credit'.
         Should be rejected with 400 because walk-in customers cannot use
         Credit payment term.
         """
         payload = {
-            'customer': {'customer_name': 'Credit Test Walkin'},
+            'customer_data': {
+                'customer_id': None,
+                'customer_name': 'Credit Test Walkin',
+                'phone': '03112222222',
+                'customer_type': 'walkin',
+                'tax_number': None,
+            },
             'payment_term': 'Credit',
             'paid_amount': '0',
             'vat_percentage': '0',
@@ -2255,15 +2272,20 @@ class LedgerCalculationTests(TestCase):
             ),
         )
 
-    def test_35_invoice_creation_inline_object_missing_customer_name_rejected(self):
+    def test_35_invoice_creation_customer_data_missing_required_fields_rejected(self):
         """
-        Test 35: POST to /api/sales/invoices/ with customer as an empty
-        object {} (or {"customer_name": ""}). Should be rejected with 400
-        with a validation error mentioning customer_name is required.
+        Test 35: POST to /api/sales/invoices/ with customer_data missing
+        required fields. Assert 400 for missing customer_name and phone.
         """
-        # Test with empty object
+        # Test with missing customer_name (empty string)
         payload = {
-            'customer': {},
+            'customer_data': {
+                'customer_id': None,
+                'customer_name': '',
+                'phone': '03113333333',
+                'customer_type': 'walkin',
+                'tax_number': None,
+            },
             'payment_term': 'Cash',
             'paid_amount': '0',
             'vat_percentage': '0',
@@ -2283,13 +2305,19 @@ class LedgerCalculationTests(TestCase):
             response.status_code,
             status.HTTP_400_BAD_REQUEST,
             msg=(
-                f"[Test 35a] Expected 400 for empty object, got "
+                f"[Test 35a] Expected 400 for blank customer_name, got "
                 f"{response.status_code}. Response body: {response.data}"
             ),
         )
 
-        # Test with blank customer_name
-        payload['customer'] = {'customer_name': ''}
+        # Test with missing phone (empty string)
+        payload['customer_data'] = {
+            'customer_id': None,
+            'customer_name': 'Has Name',
+            'phone': '',
+            'customer_type': 'walkin',
+            'tax_number': None,
+        }
         response = self.client.post(
             '/api/sales/invoices/', payload, format='json',
         )
@@ -2297,24 +2325,24 @@ class LedgerCalculationTests(TestCase):
             response.status_code,
             status.HTTP_400_BAD_REQUEST,
             msg=(
-                f"[Test 35b] Expected 400 for blank customer_name, got "
+                f"[Test 35b] Expected 400 for blank phone, got "
                 f"{response.status_code}. Response body: {response.data}"
             ),
         )
 
-    def test_36_inline_walkin_customer_with_full_optional_details(self):
+    def test_36_inline_walkin_customer_with_tax_number(self):
         """
-        Test 36: POST to /api/sales/invoices/ with customer as an inline
-        object containing all optional fields (phone, email, address) in
-        addition to customer_name. Assert 201 and verify all fields are
-        saved correctly on the created Customer record.
+        Test 36: POST to /api/sales/invoices/ with customer_data that
+        includes an optional tax_number. Assert 201 and verify the
+        tax_number is saved on the created Customer record.
         """
         payload = {
-            'customer': {
-                'customer_name': 'Full Detail Walkin',
-                'phone': '03009998888',
-                'email': 'walkin@test.com',
-                'address': 'Test Street 123',
+            'customer_data': {
+                'customer_id': None,
+                'customer_name': 'Tax Number Walkin',
+                'phone': '03114444444',
+                'customer_type': 'walkin',
+                'tax_number': 'NTN-12345',
             },
             'payment_term': 'Cash',
             'paid_amount': '0',
@@ -2322,7 +2350,7 @@ class LedgerCalculationTests(TestCase):
             'invoice_discount': '0',
             'invoiceStatus': 'Saved',
             'items': [{
-                'item_name': 'TestItem_FullDetail',
+                'item_name': 'TestItem_TaxNumber',
                 'quantity': '1',
                 'rate': '500',
                 'discount': '0',
@@ -2346,7 +2374,7 @@ class LedgerCalculationTests(TestCase):
 
         self.assertIsNotNone(cust, "[Test 36] invoice.customer should not be None")
         self.assertEqual(
-            cust.customer_name, 'Full Detail Walkin',
+            cust.customer_name, 'Tax Number Walkin',
             msg=f"[Test 36] customer_name mismatch: got '{cust.customer_name}'",
         )
         self.assertEqual(
@@ -2354,31 +2382,31 @@ class LedgerCalculationTests(TestCase):
             msg=f"[Test 36] customer_type mismatch: got '{cust.customer_type}'",
         )
         self.assertEqual(
-            cust.phone, '03009998888',
+            cust.phone, '03114444444',
             msg=f"[Test 36] phone mismatch: got '{cust.phone}'",
         )
         self.assertEqual(
-            cust.email, 'walkin@test.com',
-            msg=f"[Test 36] email mismatch: got '{cust.email}'",
-        )
-        self.assertEqual(
-            cust.address, 'Test Street 123',
-            msg=f"[Test 36] address mismatch: got '{cust.address}'",
+            cust.tax_number, 'NTN-12345',
+            msg=f"[Test 36] tax_number mismatch: got '{cust.tax_number}'",
         )
 
-    def test_37_inline_walkin_customer_duplicate_phone_rejected(self):
+    def test_37_existing_customer_matched_by_phone_links_to_invoice(self):
         """
         Test 37: Create an existing customer with a known phone number,
-        then attempt to create an inline walk-in customer using the same
-        phone number. Should be rejected with 400.
+        then create an invoice with customer_data using the same phone.
+        The new behavior links to the EXISTING customer instead of
+        rejecting the duplicate — this is the phone-based lookup.
         """
         existing = self.create_customer()
         duplicate_phone = existing.phone  # auto-generated unique phone
 
         payload = {
-            'customer': {
-                'customer_name': 'Duplicate Phone Walkin',
+            'customer_data': {
+                'customer_id': None,
+                'customer_name': 'Different Name',
                 'phone': duplicate_phone,
+                'customer_type': 'walkin',
+                'tax_number': None,
             },
             'payment_term': 'Cash',
             'paid_amount': '0',
@@ -2386,7 +2414,7 @@ class LedgerCalculationTests(TestCase):
             'invoice_discount': '0',
             'invoiceStatus': 'Saved',
             'items': [{
-                'item_name': 'TestItem_DuplicatePhone',
+                'item_name': 'TestItem_PhoneMatch',
                 'quantity': '1',
                 'rate': '1000',
                 'discount': '0',
@@ -2397,11 +2425,26 @@ class LedgerCalculationTests(TestCase):
         )
         self.assertEqual(
             response.status_code,
-            status.HTTP_400_BAD_REQUEST,
+            status.HTTP_201_CREATED,
             msg=(
-                f"[Test 37] Expected 400 for duplicate phone, got "
+                f"[Test 37] Expected 201 (phone match links existing), got "
                 f"{response.status_code}. Response body: {response.data}"
             ),
+        )
+
+        # Verify it linked to the EXISTING customer
+        invoice = SalesInvoice.objects.get(id=response.data['id'])
+        self.assertEqual(
+            invoice.customer.id, existing.id,
+            msg=(
+                f"[Test 37] Expected invoice linked to existing customer "
+                f"id={existing.id}, got id={invoice.customer.id}"
+            ),
+        )
+        # No new customer should have been created with that phone
+        self.assertEqual(
+            Customer.objects.filter(phone=duplicate_phone).count(), 1,
+            msg="[Test 37] Should still be exactly 1 customer with that phone",
         )
 
     def test_38_draft_invoice_has_zero_balance_effect(self):
@@ -2413,7 +2456,13 @@ class LedgerCalculationTests(TestCase):
         customer = self.create_customer(opening_credit=Decimal('0'))
 
         payload = {
-            'customer': customer.customer_id,
+            'customer_data': {
+                'customer_id': customer.customer_id,
+                'customer_name': customer.customer_name,
+                'phone': customer.phone,
+                'customer_type': 'walkin',
+                'tax_number': None,
+            },
             'payment_term': 'Credit',
             'paid_amount': '500',
             'vat_percentage': '0',
@@ -2490,7 +2539,13 @@ class LedgerCalculationTests(TestCase):
 
         # Create Draft invoice
         payload = {
-            'customer': customer.customer_id,
+            'customer_data': {
+                'customer_id': customer.customer_id,
+                'customer_name': customer.customer_name,
+                'phone': customer.phone,
+                'customer_type': 'walkin',
+                'tax_number': None,
+            },
             'payment_term': 'Credit',
             'paid_amount': '0',
             'vat_percentage': '0',
@@ -2594,7 +2649,13 @@ class LedgerCalculationTests(TestCase):
         customer = self.create_customer(opening_credit=Decimal('0'))
 
         payload = {
-            'customer': customer.customer_id,
+            'customer_data': {
+                'customer_id': customer.customer_id,
+                'customer_name': customer.customer_name,
+                'phone': customer.phone,
+                'customer_type': 'walkin',
+                'tax_number': None,
+            },
             'payment_term': 'Credit',
             'paid_amount': '1000',
             'vat_percentage': '0',
@@ -2652,7 +2713,13 @@ class LedgerCalculationTests(TestCase):
         customer = self.create_customer()
 
         payload = {
-            'customer': customer.customer_id,
+            'customer_data': {
+                'customer_id': customer.customer_id,
+                'customer_name': customer.customer_name,
+                'phone': customer.phone,
+                'customer_type': 'walkin',
+                'tax_number': None,
+            },
             'payment_term': 'Cash',
             'paid_amount': '0',
             'vat_percentage': '0',
@@ -2706,3 +2773,333 @@ class LedgerCalculationTests(TestCase):
                 f"(renamed to 'invoiceStatus'). Keys: {list(detail.data.keys())}"
             ),
         )
+
+    # ═══════════════════════════════════════════════════════════════════
+    # CUSTOMER DATA FIELD TESTS (42-47)
+    # ═══════════════════════════════════════════════════════════════════
+
+    def test_42_invoice_customer_data_creates_new_walkin_by_phone(self):
+        """
+        Test A — Do NOT pre-create a customer. POST with customer_data
+        containing a new phone number. Assert 201 and verify a new
+        walk-in customer was created with the correct fields.
+        """
+        payload = {
+            'customer_data': {
+                'customer_id': None,
+                'customer_name': 'Phone Test Walkin',
+                'phone': '03219998877',
+                'customer_type': 'walkin',
+                'tax_number': None,
+            },
+            'payment_term': 'Cash',
+            'paid_amount': '0',
+            'vat_percentage': '0',
+            'invoice_discount': '0',
+            'invoiceStatus': 'Saved',
+            'items': [{
+                'item_name': 'TestItem_NewPhone',
+                'quantity': '1',
+                'rate': '500',
+                'discount': '0',
+            }],
+        }
+        response = self.client.post(
+            '/api/sales/invoices/', payload, format='json',
+        )
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_201_CREATED,
+            msg=(
+                f"[Test 42] Expected 201 but got {response.status_code}. "
+                f"Response body: {response.data}"
+            ),
+        )
+
+        invoice = SalesInvoice.objects.get(id=response.data['id'])
+        self.assertEqual(
+            invoice.customer.customer_name, 'Phone Test Walkin',
+            msg=f"[Test 42] customer_name: got '{invoice.customer.customer_name}'",
+        )
+        self.assertEqual(
+            invoice.customer.customer_type, 'walkin',
+            msg=f"[Test 42] customer_type: got '{invoice.customer.customer_type}'",
+        )
+        self.assertEqual(
+            invoice.customer.phone, '03219998877',
+            msg=f"[Test 42] phone: got '{invoice.customer.phone}'",
+        )
+        self.assertGreaterEqual(
+            invoice.customer.customer_id, 8000,
+            msg=(
+                f"[Test 42] Walk-in customer_id should be >= 8000, "
+                f"got {invoice.customer.customer_id}"
+            ),
+        )
+
+    def test_43_invoice_customer_data_matches_existing_customer_by_phone(self):
+        """
+        Test B — Create a customer via create_customer(). POST an invoice
+        with customer_data using a DIFFERENT customer_name but the SAME
+        phone. Assert 201. Assert the invoice links to the EXISTING
+        customer, and no new Customer was created.
+        """
+        existing = self.create_customer()
+        original_phone = existing.phone
+        original_id = existing.id
+
+        payload = {
+            'customer_data': {
+                'customer_id': None,
+                'customer_name': 'Different Name Entirely',
+                'phone': original_phone,
+                'customer_type': 'walkin',
+                'tax_number': None,
+            },
+            'payment_term': 'Cash',
+            'paid_amount': '0',
+            'vat_percentage': '0',
+            'invoice_discount': '0',
+            'invoiceStatus': 'Saved',
+            'items': [{
+                'item_name': 'TestItem_PhoneMatch',
+                'quantity': '1',
+                'rate': '700',
+                'discount': '0',
+            }],
+        }
+        response = self.client.post(
+            '/api/sales/invoices/', payload, format='json',
+        )
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_201_CREATED,
+            msg=(
+                f"[Test 43] Expected 201 but got {response.status_code}. "
+                f"Response body: {response.data}"
+            ),
+        )
+
+        invoice = SalesInvoice.objects.get(id=response.data['id'])
+        self.assertEqual(
+            invoice.customer.id, original_id,
+            msg=(
+                f"[Test 43] Expected invoice linked to existing customer "
+                f"id={original_id}, got id={invoice.customer.id}"
+            ),
+        )
+        # Ensure no duplicate was created
+        self.assertEqual(
+            Customer.objects.filter(phone=original_phone).count(), 1,
+            msg="[Test 43] Should still be exactly 1 customer with that phone",
+        )
+
+    def test_44_invoice_customer_data_rejects_non_walkin_type(self):
+        """
+        Test C — POST with customer_data customer_type='permanent'.
+        Assert 400 with an error mentioning customer_type must be 'walkin'.
+        """
+        payload = {
+            'customer_data': {
+                'customer_id': None,
+                'customer_name': 'Permanent Attempt',
+                'phone': '03225556666',
+                'customer_type': 'permanent',
+                'tax_number': None,
+            },
+            'payment_term': 'Cash',
+            'paid_amount': '0',
+            'vat_percentage': '0',
+            'invoice_discount': '0',
+            'invoiceStatus': 'Saved',
+            'items': [{
+                'item_name': 'TestItem_NonWalkin',
+                'quantity': '1',
+                'rate': '500',
+                'discount': '0',
+            }],
+        }
+        response = self.client.post(
+            '/api/sales/invoices/', payload, format='json',
+        )
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+            msg=(
+                f"[Test 44] Expected 400 for non-walkin type, got "
+                f"{response.status_code}. Response body: {response.data}"
+            ),
+        )
+
+    def test_45_invoice_customer_data_requires_customer_name_and_phone(self):
+        """
+        Test D — POST with customer_data missing customer_name (empty string).
+        Assert 400. Separately, POST with customer_data missing phone.
+        Assert 400.
+        """
+        # Missing customer_name
+        payload = {
+            'customer_data': {
+                'customer_id': None,
+                'customer_name': '',
+                'phone': '03227778888',
+                'customer_type': 'walkin',
+                'tax_number': None,
+            },
+            'payment_term': 'Cash',
+            'paid_amount': '0',
+            'vat_percentage': '0',
+            'invoice_discount': '0',
+            'invoiceStatus': 'Saved',
+            'items': [{
+                'item_name': 'TestItem_NoName',
+                'quantity': '1',
+                'rate': '500',
+                'discount': '0',
+            }],
+        }
+        response = self.client.post(
+            '/api/sales/invoices/', payload, format='json',
+        )
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+            msg=(
+                f"[Test 45a] Expected 400 for blank customer_name, got "
+                f"{response.status_code}. Response body: {response.data}"
+            ),
+        )
+
+        # Missing phone
+        payload['customer_data'] = {
+            'customer_id': None,
+            'customer_name': 'Has Name No Phone',
+            'phone': '',
+            'customer_type': 'walkin',
+            'tax_number': None,
+        }
+        response = self.client.post(
+            '/api/sales/invoices/', payload, format='json',
+        )
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+            msg=(
+                f"[Test 45b] Expected 400 for blank phone, got "
+                f"{response.status_code}. Response body: {response.data}"
+            ),
+        )
+
+    def test_46_invoice_response_customer_data_shows_full_nested_object(self):
+        """
+        Test E — Create an invoice via the API. Fetch it via
+        GET /api/sales/invoices/{id}/. Assert response['customer_data']
+        is a dict containing customerId, customerName, customerType,
+        Phone keys with correct values.
+        """
+        customer = self.create_customer()
+        inv = self.create_invoice_via_api(customer, 'Cash', Decimal('1000'))
+
+        response = self.client.get(f'/api/sales/invoices/{inv.id}/')
+        self.assertEqual(
+            response.status_code, status.HTTP_200_OK,
+            msg=f"[Test 46] GET expected 200, got {response.status_code}",
+        )
+
+        customer_data = response.data['customer_data']
+        self.assertIsInstance(
+            customer_data, dict,
+            msg=(
+                f"[Test 46] customer_data should be a dict, got "
+                f"{type(customer_data).__name__}"
+            ),
+        )
+        self.assertEqual(
+            customer_data['customerId'], customer.customer_id,
+            msg=(
+                f"[Test 46] customerId: expected {customer.customer_id}, "
+                f"got {customer_data['customerId']}"
+            ),
+        )
+        self.assertEqual(
+            customer_data['customerName'], customer.customer_name,
+            msg=(
+                f"[Test 46] customerName: expected '{customer.customer_name}', "
+                f"got '{customer_data['customerName']}'"
+            ),
+        )
+        self.assertEqual(
+            customer_data['customerType'], customer.customer_type,
+            msg=(
+                f"[Test 46] customerType: expected '{customer.customer_type}', "
+                f"got '{customer_data['customerType']}'"
+            ),
+        )
+        self.assertEqual(
+            customer_data['Phone'], customer.phone,
+            msg=(
+                f"[Test 46] Phone: expected '{customer.phone}', "
+                f"got '{customer_data['Phone']}'"
+            ),
+        )
+
+    def test_47_invoice_customer_data_matches_existing_permanent_customer_by_phone_allows_credit(self):
+        """
+        Test F — Create a permanent customer. POST an invoice with
+        customer_data using that customer's REAL phone, customer_type='walkin'
+        (as required in the payload), payment_term='Credit'. Assert 201 —
+        confirming that the actual matched customer being 'permanent'
+        correctly ALLOWS Credit payment.
+        """
+        customer = self.create_customer(customer_type='permanent')
+
+        payload = {
+            'customer_data': {
+                'customer_id': None,
+                'customer_name': 'Payload Name Irrelevant',
+                'phone': customer.phone,
+                'customer_type': 'walkin',
+                'tax_number': None,
+            },
+            'payment_term': 'Credit',
+            'paid_amount': '0',
+            'vat_percentage': '0',
+            'invoice_discount': '0',
+            'invoiceStatus': 'Saved',
+            'items': [{
+                'item_name': 'TestItem_PermanentCredit',
+                'quantity': '1',
+                'rate': '2000',
+                'discount': '0',
+            }],
+        }
+        response = self.client.post(
+            '/api/sales/invoices/', payload, format='json',
+        )
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_201_CREATED,
+            msg=(
+                f"[Test 47] Expected 201 (permanent customer matched by "
+                f"phone allows Credit), got {response.status_code}. "
+                f"Response body: {response.data}"
+            ),
+        )
+
+        # Verify it linked to the existing permanent customer
+        invoice = SalesInvoice.objects.get(id=response.data['id'])
+        self.assertEqual(
+            invoice.customer.id, customer.id,
+            msg=(
+                f"[Test 47] Expected invoice linked to permanent customer "
+                f"id={customer.id}, got id={invoice.customer.id}"
+            ),
+        )
+        self.assertEqual(
+            invoice.customer.customer_type, 'permanent',
+            msg=(
+                f"[Test 47] Matched customer should be 'permanent', "
+                f"got '{invoice.customer.customer_type}'"
+            ),
+        )
+

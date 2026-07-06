@@ -469,13 +469,15 @@ class SalesInvoiceViewSet(viewsets.ModelViewSet):
     @swagger_auto_schema(
         operation_description=(
             SALES_PERMISSION_NOTE +
-            "\n\ncustomer field accepts EITHER an existing customer_id "
-            "(integer, e.g. 4023) OR an object to create a new walk-in "
-            "customer inline, e.g. "
-            "{\"customer_name\": \"Raza Khan\", \"phone\": \"03001234567\", "
-            "\"email\": \"raza@example.com\", \"address\": \"Main Market\"} "
-            "— only customer_name is required in the object form, the "
-            "rest are optional."
+            "\n\ncustomer_data must be an object: "
+            '{"customer_id": null, "customer_name": "Raza Khan", '
+            '"phone": "03001234567", "customer_type": "walkin", '
+            '"tax_number": null}. '
+            "The phone number is used to look up any existing customer "
+            "(of any type) — if found, the invoice links to that existing "
+            "customer; otherwise a new walk-in customer is created. "
+            "customer_type must always be 'walkin' in this payload — "
+            "invoice creation cannot create permanent customers."
         )
     )
     def create(self, request, *args, **kwargs):
