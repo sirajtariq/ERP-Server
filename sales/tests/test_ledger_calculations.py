@@ -11,11 +11,13 @@ CRITICAL DESIGN PRINCIPLE:
 """
 
 import datetime
+from datetime import date
 import time
 from decimal import Decimal
 
 from django.contrib.auth.models import User
 from django.test import TestCase
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIClient
 
@@ -3103,3 +3105,136 @@ class LedgerCalculationTests(TestCase):
             ),
         )
 
+    def test_48_customer_api_creation_requires_phone(self):
+        """
+        Test G — POST to /api/sales/customers/ with full payload EXCEPT phone.
+        Assert response status 400 with error mentioning Phone is required.
+        """
+        payload = {
+            'customerName': 'NoPhone Customer',
+            'customerType': 'permanent',
+            'Address': '123 Test St',
+        }
+        response = self.client.post('/api/sales/customers/', payload, format='json')
+        self.assertEqual(
+            response.status_code, status.HTTP_400_BAD_REQUEST,
+            msg=f"[Test 48] Expected 400 when Phone omitted, got {response.status_code}",
+        )
+        self.assertIn(
+            'Phone', response.data,
+            msg=f"[Test 48] Expected 'Phone' in validation errors, got {response.data}",
+        )
+
+    def test_49_customer_api_creation_address_is_optional(self):
+        """
+        Test H — POST to /api/sales/customers/ with NO Address key.
+        Assert response status 201.
+        """
+        LedgerCalculationTests._phone_counter += 1
+        phone = f'0300{LedgerCalculationTests._phone_counter:07d}'
+        payload = {
+            'customerName': 'NoAddress Customer',
+            'customerType': 'permanent',
+            'Phone': phone,
+        }
+        response = self.client.post('/api/sales/customers/', payload, format='json')
+        self.assertEqual(
+            response.status_code, status.HTTP_201_CREATED,
+            msg=f"[Test 49] Expected 201 when Address omitted, got {response.status_code}. Response: {response.data}",
+        )
+
+    def test_50_customer_api_creation_duplicate_phone_returns_clean_400(self):
+        """
+        Test I — Create a customer. POST to /api/sales/customers/ with DIFFERENT
+        customerName but the SAME phone number.
+        Assert response status 400 (not 500 IntegrityError).
+        """
+        existing_customer = self.create_customer(customer_type='permanent')
+        
+        payload = {
+            'customerName': 'DuplicatePhone Customer',
+            'customerType': 'walkin',
+            'Phone': existing_customer.phone,
+        }
+        response = self.client.post('/api/sales/customers/', payload, format='json')
+        self.assertEqual(
+            response.status_code, status.HTTP_400_BAD_REQUEST,
+            msg=f"[Test 50] Expected 400 for duplicate phone, got {response.status_code}",
+        )
+        self.assertIn(
+            'Phone', response.data,
+            msg=f"[Test 50] Expected 'Phone' in validation errors, got {response.data}",
+        )
+
+    def test_51_invoice_creation_with_backdated_date(self):
+        """
+        Test J — POST to /api/sales/invoices/ with explicit date in past.
+        Assert 201 and invoice.date equals exactly that past date.
+        """
+        LedgerCalculationTests._phone_counter += 1
+        phone = f'0300{LedgerCalculationTests._phone_counter:07d}'
+        payload = {
+            'customer_data': {
+                'customer_id': None,
+                'customer_name': 'Backdated Customer',
+                'phone': phone,
+                'customer_type': 'walkin',
+                'tax_number': None,
+            },
+            'payment_term': 'Cash',
+            'paid_amount': '0',
+            'invoiceStatus': 'Saved',
+            'date': '2026-01-15',
+            'items': [{
+                'item_name': 'TestItem_Backdated',
+                'quantity': '1',
+                'rate': '1000',
+                'discount': '0',
+            }],
+        }
+        response = self.client.post('/api/sales/invoices/', payload, format='json')
+        self.assertEqual(
+            response.status_code, status.HTTP_201_CREATED,
+            msg=f"[Test 51] Expected 201, got {response.status_code}. Response: {response.data}"
+        )
+        invoice = SalesInvoice.objects.get(id=response.data['id'])
+        self.assertEqual(
+            invoice.date, date(2026, 1, 15),
+            msg=f"[Test 51] Expected date 2026-01-15, got {invoice.date}"
+        )
+
+    def test_52_invoice_creation_without_date_defaults_to_today(self):
+        """
+        Test K — POST to /api/sales/invoices/ without date key.
+        Assert 201 and invoice.date equals today.
+        """
+        LedgerCalculationTests._phone_counter += 1
+        phone = f'0300{LedgerCalculationTests._phone_counter:07d}'
+        payload = {
+            'customer_data': {
+                'customer_id': None,
+                'customer_name': 'Today Customer',
+                'phone': phone,
+                'customer_type': 'walkin',
+                'tax_number': None,
+            },
+            'payment_term': 'Cash',
+            'paid_amount': '0',
+            'invoiceStatus': 'Saved',
+            'items': [{
+                'item_name': 'TestItem_Today',
+                'quantity': '1',
+                'rate': '1000',
+                'discount': '0',
+            }],
+        }
+        response = self.client.post('/api/sales/invoices/', payload, format='json')
+        self.assertEqual(
+            response.status_code, status.HTTP_201_CREATED,
+            msg=f"[Test 52] Expected 201, got {response.status_code}. Response: {response.data}"
+        )
+        invoice = SalesInvoice.objects.get(id=response.data['id'])
+        self.assertEqual(
+            invoice.date, timezone.now().date(),
+            msg=f"[Test 52] Expected date {timezone.now().date()}, got {invoice.date}"
+        )

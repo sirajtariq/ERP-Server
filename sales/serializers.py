@@ -9,6 +9,7 @@ from decimal import Decimal
 
 from django.db.models import Sum
 from rest_framework import serializers
+from rest_framework.validators import UniqueValidator
 
 from sales.models import Customer, PaymentReceived, SalesInvoice, SalesItem
 
@@ -80,8 +81,15 @@ class CustomerSerializer(serializers.ModelSerializer):
     customerId = serializers.IntegerField(source="customer_id", read_only=True)
     customerName = serializers.CharField(source="customer_name")
     customerType = serializers.ChoiceField(source="customer_type",choices=['permanent', 'walkin'],required=True)
-    Phone = serializers.CharField(source="phone", required=False, allow_blank=True, allow_null=True)
-    Address = serializers.CharField(source="address")
+    Phone = serializers.CharField(
+        source="phone",
+        required=True,
+        validators=[UniqueValidator(
+            queryset=Customer.objects.all(),
+            message="A customer with this phone number already exists."
+        )],
+    )
+    Address = serializers.CharField(source="address", required=False, allow_blank=True)
     openingCredit = serializers.DecimalField(source="opening_credit", max_digits=12, decimal_places=2, required=False, allow_null=True)
     openingNote = serializers.CharField(source="opening_note", required=False, allow_blank=True)
     taxNumber = serializers.CharField(source="tax_number", required=False, allow_null=True,allow_blank=True)
@@ -249,6 +257,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         source='status',
         choices=SalesInvoice.STATUS_CHOICES,
     )
+    date = serializers.DateField(required=False)
     subtotal = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     total_line_discount = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     tax_amount = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
@@ -282,7 +291,6 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         read_only_fields = [
             "id", 
             "invoice_number", 
-            "date", 
             "subtotal", 
             "total_line_discount", 
             "tax_amount", 
