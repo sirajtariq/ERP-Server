@@ -180,83 +180,70 @@ class SalesInvoiceListSerializer(serializers.ModelSerializer):
         return compute_payment_status(obj)
 
 
-class CustomerOrInlineCreateField(serializers.Field):
+class CustomerDataField(serializers.Field):
     """
-    Accepts either:
-    - An existing customer's customer_id as an integer/numeric string
-      (looks up and returns that Customer instance), or
-    - A dict with at least 'customer_name' (creates a new Customer
-      with customer_type='walkin' inline, and returns that instance).
+    Writable + readable field for the invoice's customer.
 
-    Always serializes back out as the customer's customer_id (int),
-    regardless of which input form was used to create/link it.
+    WRITE (to_internal_value): accepts a dict with customer_name,
+    phone, customer_type (must be 'walkin'), and optional
+    customer_id/tax_number. Looks up an existing Customer by PHONE
+    NUMBER (the authoritative match, regardless of customer_id) —
+    if found, links to that existing customer (of any type); if
+    not found, creates a new Customer with customer_type='walkin'.
+
+    READ (to_representation): outputs the resolved customer's full
+    info using CustomerListSerializer.
     """
 
     def to_internal_value(self, data):
-        # Case 1: existing customer, referenced by customer_id
-        if isinstance(data, (int, str)) and not isinstance(data, dict):
-            try:
-                customer_id = int(data)
-            except (TypeError, ValueError):
-                raise serializers.ValidationError(
-                    "customer must be a customer_id (integer) or an "
-                    "object with at least customer_name to create a "
-                    "new walk-in customer."
-                )
-            try:
-                return Customer.objects.get(customer_id=customer_id)
-            except Customer.DoesNotExist:
-                raise serializers.ValidationError(
-                    f"No customer found with customer_id={customer_id}."
-                )
-
-        # Case 2: inline creation of a new walk-in customer
-        if isinstance(data, dict):
-            customer_name = data.get('customer_name', '').strip()
-            if not customer_name:
-                raise serializers.ValidationError(
-                    "customer_name is required to create a new "
-                    "walk-in customer inline."
-                )
-
-            phone = data.get('phone')
-            if phone:
-                phone = str(phone).strip()
-                if Customer.objects.filter(phone=phone).exists():
-                    raise serializers.ValidationError(
-                        f"A customer with phone number '{phone}' already "
-                        f"exists. Search for them instead of creating a "
-                        f"new one, or omit the phone number."
-                    )
-            else:
-                phone = None
-
-            email = data.get('email') or None
-            address = data.get('address', '') or ''
-
-            return Customer.objects.create(
-                customer_name=customer_name,
-                customer_type='walkin',
-                phone=phone,
-                email=email,
-                address=address,
+        if not isinstance(data, dict):
+            raise serializers.ValidationError(
+                "customer_data must be an object with customer_name, "
+                "phone, customer_type, and optionally customer_id/"
+                "tax_number."
             )
 
-        raise serializers.ValidationError(
-            "customer must be a customer_id (integer) or an object "
-            "with at least customer_name to create a new walk-in "
-            "customer."
+        customer_name = (data.get('customer_name') or '').strip()
+        phone = (data.get('phone') or '').strip()
+        customer_type = data.get('customer_type')
+        tax_number = data.get('tax_number') or None
+
+        if not customer_name:
+            raise serializers.ValidationError(
+                "customer_data.customer_name is required."
+            )
+        if not phone:
+            raise serializers.ValidationError(
+                "customer_data.phone is required."
+            )
+        if customer_type != 'walkin':
+            raise serializers.ValidationError(
+                "customer_data.customer_type must be 'walkin' — "
+                "invoice creation can only generate walk-in "
+                "customers. Existing permanent customers are "
+                "matched automatically by phone number."
+            )
+
+        existing = Customer.objects.filter(phone=phone).first()
+        if existing:
+            return existing
+
+        return Customer.objects.create(
+            customer_name=customer_name,
+            customer_type='walkin',
+            phone=phone,
+            tax_number=tax_number,
         )
 
     def to_representation(self, value):
-        # value is a Customer instance — always output its customer_id
-        return value.customer_id if value else None
+        if not value:
+            return None
+        return CustomerListSerializer(value).data
 
 
 class SalesInvoiceSerializer(serializers.ModelSerializer):
     items = SalesItemNestedSerializer(many=True)
-    customer = CustomerOrInlineCreateField(required=False, allow_null=True)
-    customer_data = CustomerListSerializer(source='customer', read_only=True)
+    customer_data = CustomerDataField(source='customer')
     paymentStatus = serializers.SerializerMethodField()
     invoiceStatus = serializers.ChoiceField(
         source='status',
@@ -274,7 +261,6 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             "id",
             "invoice_number",
             "date",
-            "customer",
             "customer_data",
             "payment_term",
             "payment_method",
@@ -297,7 +283,6 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             "id", 
             "invoice_number", 
             "date", 
-            "customer_data", 
             "subtotal", 
             "total_line_discount", 
             "tax_amount", 
@@ -324,9 +309,8 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
 
         if not customer:
             raise serializers.ValidationError(
-                "A customer is required — either an existing customer_id "
-                "or an object with customer_name to create a new "
-                "walk-in customer."
+                "customer_data is required — provide an object with "
+                "customer_name, phone, and customer_type='walkin'."
             )
 
         if customer.customer_type == 'walkin' and payment_term == 'Credit':
