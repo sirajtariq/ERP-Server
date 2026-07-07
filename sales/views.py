@@ -423,8 +423,8 @@ class SalesInvoiceViewSet(viewsets.ModelViewSet):
 
         if customer_type == 'walkin':
             qs = qs.filter(customer__isnull=True)
-        elif customer_type == 'loyal':
-            qs = qs.filter(customer__isnull=False)
+        elif customer_type == 'permanent':
+            qs = qs.filter(customer__customer_type='permanent')
         return qs
 
     @swagger_auto_schema(
