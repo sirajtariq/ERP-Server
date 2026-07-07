@@ -4,6 +4,7 @@ Sales module data models: customers, invoices, and line items.
 
 from decimal import Decimal
 from django.db import IntegrityError, models, transaction
+from django.utils import timezone
 from sales.base_models import SoftDeleteModel
 
 
@@ -102,7 +103,7 @@ class SalesInvoice(SoftDeleteModel):
     status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='Draft')
     
     invoice_number = models.CharField(max_length=50, unique=True, blank=True)
-    date = models.DateField(auto_now_add=True)
+    date = models.DateField(default=timezone.localdate)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
