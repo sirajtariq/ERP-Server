@@ -206,9 +206,7 @@ class CustomerDataField(serializers.Field):
     def to_internal_value(self, data):
         if not isinstance(data, dict):
             raise serializers.ValidationError(
-                "customer_data must be an object with customer_name, "
-                "phone, customer_type, and optionally customer_id/"
-                "tax_number."
+                "customer_data must be an object with customer_name, phone, customer_type, and optionally customer_id/tax_number."
             )
 
         customer_name = (data.get('customer_name') or '').strip()
@@ -217,31 +215,26 @@ class CustomerDataField(serializers.Field):
         tax_number = data.get('tax_number') or None
 
         if not customer_name:
-            raise serializers.ValidationError(
-                "customer_data.customer_name is required."
-            )
+            raise serializers.ValidationError("customer_data.customer_name is required.")
         if not phone:
-            raise serializers.ValidationError(
-                "customer_data.phone is required."
-            )
+            raise serializers.ValidationError("customer_data.phone is required.")
+            
         existing = Customer.objects.filter(phone=phone).first()
         if existing:
             return existing
 
         if customer_type != 'walkin':
             raise serializers.ValidationError(
-                "customer_data.customer_type must be 'walkin' — "
-                "invoice creation can only generate walk-in "
-                "customers. Existing permanent customers are "
-                "matched automatically by phone number."
+                "customer_data.customer_type must be 'walkin' — invoice creation can only generate walk-in customers."
             )
 
-        return Customer.objects.create(
-            customer_name=customer_name,
-            customer_type='walkin',
-            phone=phone,
-            tax_number=tax_number,
-        )
+        return {
+            'is_new_customer': True,
+            'customer_name': customer_name,
+            'customer_type': 'walkin',
+            'phone': phone,
+            'tax_number': tax_number,
+        }
 
     def to_representation(self, value):
         if not value:
@@ -307,8 +300,6 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         customer = attrs.get('customer')
         payment_term = attrs.get('payment_term')
 
-        # On partial update (PATCH), fall back to existing instance values
-        # for fields not included in the request payload.
         if self.instance:
             if not customer:
                 customer = self.instance.customer
@@ -316,15 +307,16 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                 payment_term = self.instance.payment_term
 
         if not customer:
-            raise serializers.ValidationError(
-                "customer_data is required — provide an object with "
-                "customer_name, phone, and customer_type='walkin'."
-            )
+            raise serializers.ValidationError("customer_data is required.")
 
-        if customer.customer_type == 'walkin' and payment_term == 'Credit':
-            raise serializers.ValidationError(
-                "Walk-in customers can only pay via Cash."
-            )
+        # Check k customer dict ha ya model instance
+        if isinstance(customer, dict):
+            c_type = customer.get('customer_type')
+        else:
+            c_type = customer.customer_type
+
+        if c_type == 'walkin' and payment_term == 'Credit':
+            raise serializers.ValidationError("Walk-in customers can only pay via Cash.")
 
         return attrs
 
@@ -368,8 +360,15 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data: dict) -> SalesInvoice:
         items_data = validated_data.pop("items")
+        customer_data = validated_data.pop("customer")
 
-        invoice = SalesInvoice.objects.create(**validated_data)
+        if isinstance(customer_data, dict) and customer_data.get('is_new_customer'):
+            customer_data.pop('is_new_customer', None)
+            customer = Customer.objects.create(**customer_data)
+        else:
+            customer = customer_data
+
+        invoice = SalesInvoice.objects.create(customer=customer, **validated_data)
         original_paid_amount = invoice.paid_amount
 
         for item_data in items_data:
@@ -382,7 +381,16 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
 
     def update(self, instance: SalesInvoice, validated_data: dict) -> SalesInvoice:
         items_data = validated_data.pop("items", None)
+        customer_data = validated_data.pop("customer", None)
         old_status = instance.status
+
+        if customer_data is not None:
+            if isinstance(customer_data, dict) and customer_data.get('is_new_customer'):
+                customer_data.pop('is_new_customer', None)
+                customer = Customer.objects.create(**customer_data)
+            else:
+                customer = customer_data
+            instance.customer = customer
 
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
