@@ -224,6 +224,10 @@ class CustomerDataField(serializers.Field):
             raise serializers.ValidationError(
                 "customer_data.phone is required."
             )
+        existing = Customer.objects.filter(phone=phone).first()
+        if existing:
+            return existing
+
         if customer_type != 'walkin':
             raise serializers.ValidationError(
                 "customer_data.customer_type must be 'walkin' — "
@@ -231,10 +235,6 @@ class CustomerDataField(serializers.Field):
                 "customers. Existing permanent customers are "
                 "matched automatically by phone number."
             )
-
-        existing = Customer.objects.filter(phone=phone).first()
-        if existing:
-            return existing
 
         return Customer.objects.create(
             customer_name=customer_name,

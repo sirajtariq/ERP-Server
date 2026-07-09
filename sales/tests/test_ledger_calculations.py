@@ -3238,3 +3238,41 @@ class LedgerCalculationTests(TestCase):
             invoice.date, timezone.now().date(),
             msg=f"[Test 52] Expected date {timezone.now().date()}, got {invoice.date}"
         )
+
+    def test_53_invoice_creation_with_existing_permanent_customer_by_phone(self):
+        """
+        Test L — test_invoice_creation_with_existing_permanent_customer_by_phone:
+        Create a customer explicitly with customer_type='permanent' via 
+        create_customer(). POST to /api/sales/invoices/ with customer_data 
+        containing that customer's real phone number and 
+        customer_type='walkin' (as the frontend always sends). 
+        payment_term='Credit'. Assert 201 (NOT 400).
+        """
+        customer = self.create_customer(customer_type='permanent')
+        
+        payload = {
+            'customer_data': {
+                'customer_id': None,
+                'customer_name': customer.customer_name,
+                'phone': customer.phone,
+                'customer_type': 'walkin',
+                'tax_number': None,
+            },
+            'payment_term': 'Credit',
+            'paid_amount': '0',
+            'invoiceStatus': 'Saved',
+            'items': [{
+                'item_name': 'TestItem_Permanent_Walkin_Payload',
+                'quantity': '1',
+                'rate': '1000',
+                'discount': '0',
+            }],
+        }
+        response = self.client.post('/api/sales/invoices/', payload, format='json')
+        self.assertEqual(
+            response.status_code, status.HTTP_201_CREATED,
+            msg=f"[Test 53] Expected 201, got {response.status_code}. Response: {response.data}"
+        )
+        invoice = SalesInvoice.objects.get(id=response.data['id'])
+        self.assertEqual(invoice.customer.id, customer.id)
+        self.assertEqual(invoice.customer.customer_type, 'permanent')
