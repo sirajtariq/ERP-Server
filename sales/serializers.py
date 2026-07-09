@@ -7,6 +7,7 @@ single request can create or replace an invoice together with its items.
 
 from decimal import Decimal
 
+from django.db import transaction
 from django.db.models import Sum
 from rest_framework import serializers
 from rest_framework.validators import UniqueValidator
@@ -21,14 +22,10 @@ class CustomerListSerializer(serializers.ModelSerializer):
     customerName = serializers.CharField(source="customer_name", read_only=True)
     customerType = serializers.CharField(source="customer_type", read_only=True)
     Phone = serializers.CharField(source="phone", read_only=True)
-    creditBalance = serializers.DecimalField(
-        source="credit_balance", max_digits=12, decimal_places=2, read_only=True
-    )
-    advanceBalance = serializers.DecimalField(
-        source="advance_balance", max_digits=12, decimal_places=2, read_only=True
-    )
-    totalPaid = serializers.SerializerMethodField()
-    totalDue = serializers.SerializerMethodField()
+    creditBalance = serializers.DecimalField(source="credit_balance", max_digits=12, decimal_places=2, read_only=True)
+    advanceBalance = serializers.DecimalField(source="advance_balance", max_digits=12, decimal_places=2, read_only=True)
+    totalPaid = serializers.DecimalField(source="annotated_total_paid", max_digits=12, decimal_places=2, read_only=True)
+    totalDue = serializers.DecimalField(source="credit_balance", max_digits=12, decimal_places=2, read_only=True)
 
     class Meta:
         model = Customer
@@ -45,12 +42,12 @@ class CustomerListSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = fields
 
-    def get_totalPaid(self, obj):
-        result = obj.invoices.aggregate(total=Sum("paid_amount"))
-        return float(result["total"] or 0)
+    # def get_totalPaid(self, obj):
+    #     result = obj.invoices.aggregate(total=Sum("paid_amount"))
+    #     return result["total"] or Decimal('0.00')
 
     def get_totalDue(self, obj):
-        return float(obj.credit_balance)
+        return obj.credit_balance
 
 
 class CustomerInvoiceNestedSerializer(serializers.ModelSerializer):
@@ -81,21 +78,14 @@ class CustomerSerializer(serializers.ModelSerializer):
     customerId = serializers.IntegerField(source="customer_id", read_only=True)
     customerName = serializers.CharField(source="customer_name")
     customerType = serializers.ChoiceField(source="customer_type",choices=['permanent', 'walkin'],required=True)
-    Phone = serializers.CharField(
-        source="phone",
-        required=True,
-        validators=[UniqueValidator(
-            queryset=Customer.objects.all(),
-            message="A customer with this phone number already exists."
-        )],
-    )
+    Phone = serializers.CharField(source="phone",required=True, validators=[UniqueValidator(queryset=Customer.objects.all(),message="Customer with this phone number already exists.")],)
     Address = serializers.CharField(source="address", required=False, allow_blank=True)
     openingCredit = serializers.DecimalField(source="opening_credit", max_digits=12, decimal_places=2, required=False, allow_null=True)
     openingNote = serializers.CharField(source="opening_note", required=False, allow_blank=True)
     taxNumber = serializers.CharField(source="tax_number", required=False, allow_null=True,allow_blank=True)
     creditBalance = serializers.DecimalField(source="credit_balance", max_digits=12, decimal_places=2, read_only=True)
     advanceBalance = serializers.DecimalField(source="advance_balance", max_digits=12, decimal_places=2, read_only=True)
-    totalPaid = serializers.SerializerMethodField()
+    totalPaid = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     createdAt = serializers.DateTimeField(source="created_at", read_only=True)
     updatedAt = serializers.DateTimeField(source="updated_at", read_only=True)
     invoices = CustomerInvoiceNestedSerializer(many=True, read_only=True)
@@ -107,7 +97,7 @@ class CustomerSerializer(serializers.ModelSerializer):
 
     def get_totalPaid(self, obj):
         result = obj.payments.aggregate(total=Sum("amount_received"))
-        return float(result["total"] or 0)
+        return result["total"] or Decimal('0.00')
 
 
 class SalesItemSerializer(serializers.ModelSerializer):
@@ -206,42 +196,39 @@ class CustomerDataField(serializers.Field):
     def to_internal_value(self, data):
         if not isinstance(data, dict):
             raise serializers.ValidationError(
-                "customer_data must be an object with customer_name, "
-                "phone, customer_type, and optionally customer_id/"
-                "tax_number."
+                "customer_data must be an object with customer_name, phone, customer_type, and optionally customer_id/tax_number."
             )
 
         customer_name = (data.get('customer_name') or '').strip()
+        if not customer_name:
+            customer_name = "General"
         phone = (data.get('phone') or '').strip()
         customer_type = data.get('customer_type')
         tax_number = data.get('tax_number') or None
 
-        if not customer_name:
-            raise serializers.ValidationError(
-                "customer_data.customer_name is required."
-            )
+        # if not customer_name:
+        #     raise serializers.ValidationError("customer_data.customer_name is required.")
         if not phone:
-            raise serializers.ValidationError(
-                "customer_data.phone is required."
-            )
-        if customer_type != 'walkin':
-            raise serializers.ValidationError(
-                "customer_data.customer_type must be 'walkin' — "
-                "invoice creation can only generate walk-in "
-                "customers. Existing permanent customers are "
-                "matched automatically by phone number."
-            )
-
-        existing = Customer.objects.filter(phone=phone).first()
+            raise serializers.ValidationError("customer_data.phone is required.")
+            
+        existing = Customer.all_objects.filter(phone=phone).first()
         if existing:
+            if getattr(existing, 'is_deleted', False):
+                existing.restore()
             return existing
 
-        return Customer.objects.create(
-            customer_name=customer_name,
-            customer_type='walkin',
-            phone=phone,
-            tax_number=tax_number,
-        )
+        if customer_type != 'walkin':
+            raise serializers.ValidationError(
+                "customer_data.customer_type must be 'walkin' — invoice creation can only generate walk-in customers."
+            )
+
+        return {
+            'is_new_customer': True,
+            'customer_name': customer_name,
+            'customer_type': 'walkin',
+            'phone': phone,
+            'tax_number': tax_number,
+        }
 
     def to_representation(self, value):
         if not value:
@@ -304,11 +291,18 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         return compute_payment_status(obj)
 
     def validate(self, attrs):
+        from decimal import Decimal
+
+        # 1. Absolute Hard Lock: Reject any modification if the invoice is already 'Saved'
+        if self.instance and self.instance.status == 'Saved':
+            raise serializers.ValidationError(
+                {"invoiceStatus": "Saved invoices are locked and cannot be modified. To make changes, delete the invoice to reverse balances and recreate it."}
+            )
+
+        # 2. Extract or resolve customer and payment term for creation or update instances
         customer = attrs.get('customer')
         payment_term = attrs.get('payment_term')
 
-        # On partial update (PATCH), fall back to existing instance values
-        # for fields not included in the request payload.
         if self.instance:
             if not customer:
                 customer = self.instance.customer
@@ -316,15 +310,88 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                 payment_term = self.instance.payment_term
 
         if not customer:
+            raise serializers.ValidationError("customer_data is required.")
+
+        # Resolve customer type and current advance balance from DB
+        if isinstance(customer, dict):
+            c_type = customer.get('customer_type')
+            advance_balance = Decimal('0.00')
+        else:
+            c_type = customer.customer_type
+            advance_balance = Decimal(str(getattr(customer, 'advance_balance', 0)))
+
+        # 3. Validation: Ensure the invoice has at least one item
+        items_list = attrs.get('items')
+        if items_list is None and self.instance:
+            items_list = list(self.instance.items.all())
+        elif items_list is None:
+            items_list = []
+
+        if len(items_list) == 0:
+            raise serializers.ValidationError({"items": "An invoice must contain at least one item."})
+
+        # 4. Line items validation and calculations
+        subtotal = Decimal('0.00')
+        total_line_discount = Decimal('0.00')
+
+        for item in items_list:
+            is_dict = isinstance(item, dict)
+            qty = Decimal(str(item.get('quantity', 0) if is_dict else getattr(item, 'quantity', 0)))
+            rate = Decimal(str(item.get('rate', 0) if is_dict else getattr(item, 'rate', 0)))
+            disc = Decimal(str(item.get('discount', 0) if is_dict else getattr(item, 'discount', 0)))
+            
+            if qty <= 0 or rate <= 0:
+                raise serializers.ValidationError({"items": "Quantity and rate must be greater than zero."})
+            if disc < 0:
+                raise serializers.ValidationError({"items": "Line item discount cannot be negative."})
+            
+            subtotal += qty * rate
+            total_line_discount += disc
+
+        # 5. Header level charges and discounts calculations
+        vat_percentage = Decimal(str(attrs.get('vat_percentage', self.instance.vat_percentage if self.instance else 0)))
+        invoice_discount = Decimal(str(attrs.get('invoice_discount', self.instance.invoice_discount if self.instance else 0)))
+
+        if invoice_discount < 0:
+            raise serializers.ValidationError({"invoice_discount": "Invoice discount cannot be negative."})
+
+        base_amount = subtotal - total_line_discount
+        tax_amount = base_amount * (vat_percentage / Decimal('100'))
+        net_total = base_amount + tax_amount - invoice_discount
+        
+        # Prevent discount from driving net total into negative
+        if net_total < 0:
             raise serializers.ValidationError(
-                "customer_data is required — provide an object with "
-                "customer_name, phone, and customer_type='walkin'."
+                {"invoice_discount": f"Invoice discount cannot exceed the net total amount ({base_amount + tax_amount:.2f})."}
             )
 
-        if customer.customer_type == 'walkin' and payment_term == 'Credit':
-            raise serializers.ValidationError(
-                "Walk-in customers can only pay via Cash."
-            )
+        paid_amount = Decimal(str(attrs.get('paid_amount', self.instance.paid_amount if self.instance else 0)))
+
+        # 6. Business Rule enforcement per customer type and term mapping
+        if c_type == 'walkin':
+            if payment_term != 'Cash':
+                raise serializers.ValidationError({"payment_term": "Walk-in customers can only pay via Cash."})
+            if paid_amount != net_total:
+                raise serializers.ValidationError(
+                    f"Walk-in invoices must be paid in full. "
+                    f"Expected net total: {net_total:.2f}, received paid_amount: {paid_amount:.2f}."
+                )
+        else:
+            effective_coverage = paid_amount + advance_balance
+
+            # Case 1: Coverage is less than bill total -> Must be Credit
+            if effective_coverage < net_total and payment_term == 'Cash':
+                raise serializers.ValidationError(
+                    {"payment_term": f"Remaining balance detected after applying available advance ({advance_balance:.2f}). "
+                                     f"Payment term must be 'Credit' for partial or unpaid balances."}
+                )
+
+            # Case 2: Coverage clears or exceeds the bill -> Must be Cash
+            if effective_coverage >= net_total and payment_term == 'Credit':
+                raise serializers.ValidationError(
+                    {"payment_term": f"Invoice is fully covered by the paid amount and available advance ({advance_balance:.2f}). "
+                                     f"Payment term must be 'Cash' as no new debt is created."}
+                )
 
         return attrs
 
@@ -368,21 +435,39 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data: dict) -> SalesInvoice:
         items_data = validated_data.pop("items")
+        customer_data = validated_data.pop("customer")
 
-        invoice = SalesInvoice.objects.create(**validated_data)
+        if isinstance(customer_data, dict) and customer_data.get('is_new_customer'):
+            customer_data.pop('is_new_customer', None)
+            customer = Customer.objects.create(**customer_data)
+        else:
+            customer = customer_data
+
+        invoice = SalesInvoice.objects.create(customer=customer, **validated_data)
         original_paid_amount = invoice.paid_amount
 
         for item_data in items_data:
             SalesItem.objects.create(invoice=invoice, **item_data)
 
         if invoice.status == 'Saved':
+            # Pull freshly calculated database fields before running accounting side-effects
+            invoice.refresh_from_db()
             self._apply_invoice_balance_effects(invoice, original_paid_amount)
 
         return invoice
 
     def update(self, instance: SalesInvoice, validated_data: dict) -> SalesInvoice:
         items_data = validated_data.pop("items", None)
+        customer_data = validated_data.pop("customer", None)
         old_status = instance.status
+
+        if customer_data is not None:
+            if isinstance(customer_data, dict) and customer_data.get('is_new_customer'):
+                customer_data.pop('is_new_customer', None)
+                customer = Customer.objects.create(**customer_data)
+            else:
+                customer = customer_data
+            instance.customer = customer
 
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
@@ -522,34 +607,34 @@ class PaymentReceivedSerializer(serializers.ModelSerializer):
         amount = validated_data['amount_received']
         invoice = validated_data.get('invoice')
 
-        result = self._apply_payment(customer, amount, invoice)
-        validated_data['balance_after'] = result['balance_after']
-        validated_data['applied_to_invoice'] = result['applied_to_invoice']
-        validated_data['applied_to_credit'] = result['applied_to_credit']
-        validated_data['applied_to_advance'] = result['applied_to_advance']
+        with transaction.atomic():
+            result = self._apply_payment(customer, amount, invoice)
+            validated_data['balance_after'] = result['balance_after']
+            validated_data['applied_to_invoice'] = result['applied_to_invoice']
+            validated_data['applied_to_credit'] = result['applied_to_credit']
+            validated_data['applied_to_advance'] = result['applied_to_advance']
 
-        return super().create(validated_data)
+            return super().create(validated_data)
 
     def update(self, instance, validated_data):
-        # Reverse the OLD payment using its STORED split values
-        self._reverse_payment(
-            instance.customer,
-            instance.invoice,
-            instance.applied_to_invoice,
-            instance.applied_to_credit,
-            instance.applied_to_advance,
-        )
+        with transaction.atomic():
+            self._reverse_payment(
+                instance.customer,
+                instance.invoice,
+                instance.applied_to_invoice,
+                instance.applied_to_credit,
+                instance.applied_to_advance,
+            )
 
-        # Apply the NEW payment values fresh
-        new_customer = validated_data.get('customer', instance.customer)
-        new_amount = validated_data.get('amount_received', instance.amount_received)
-        new_invoice = validated_data.get('invoice', instance.invoice)
+            new_customer = validated_data.get('customer', instance.customer)
+            new_amount = validated_data.get('amount_received', instance.amount_received)
+            new_invoice = validated_data.get('invoice', instance.invoice)
 
-        result = self._apply_payment(new_customer, new_amount, new_invoice)
-        validated_data['balance_after'] = result['balance_after']
-        validated_data['applied_to_invoice'] = result['applied_to_invoice']
-        validated_data['applied_to_credit'] = result['applied_to_credit']
-        validated_data['applied_to_advance'] = result['applied_to_advance']
+            result = self._apply_payment(new_customer, new_amount, new_invoice)
+            validated_data['balance_after'] = result['balance_after']
+            validated_data['applied_to_invoice'] = result['applied_to_invoice']
+            validated_data['applied_to_credit'] = result['applied_to_credit']
+            validated_data['applied_to_advance'] = result['applied_to_advance']
 
-        return super().update(instance, validated_data)
+            return super().update(instance, validated_data)
 

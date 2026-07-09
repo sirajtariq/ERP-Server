@@ -44,29 +44,27 @@ class Customer(SoftDeleteModel):
                 with transaction.atomic():
                     if self.customer_type == 'walkin':
                         start_id = 8000
-                        last = Customer.objects.filter(
+                        # FIX: Use all_objects instead of objects to see soft-deleted records
+                        last = Customer.all_objects.filter(
                             customer_type='walkin'
                         ).order_by('-customer_id').first()
                     else:
                         start_id = 4000
-                        last = Customer.objects.filter(
+                        # FIX: Use all_objects instead of objects to see soft-deleted records
+                        last = Customer.all_objects.filter(
                             customer_type='permanent'
                         ).order_by('-customer_id').first()
 
                     self.customer_id = (last.customer_id + 1) if last else start_id
 
                     try:
-                        # Use a savepoint so a failed insert here doesn't
-                        # poison the outer transaction/request.
                         with transaction.atomic():
                             super(Customer, self).save(*args, **kwargs)
                         break  # success — exit retry loop
                     except IntegrityError as e:
                         if 'customer_id' in str(e) and attempt < max_attempts - 1:
-                            # Collision — loop again and recompute a fresh id
                             continue
-                        raise  # give up after max_attempts, or it's a
-                               # different/unrelated IntegrityError
+                        raise  
         else:
             super().save(*args, **kwargs)
 
@@ -133,18 +131,35 @@ class SalesInvoice(SoftDeleteModel):
         if not self.invoice_number:
             from datetime import date
             current_year = date.today().year
-            last_invoice = SalesInvoice.objects.filter(invoice_number__startswith=f'INV-{current_year}-').order_by('-id').first()
-            if last_invoice:
-                last_number = int(last_invoice.invoice_number.split('-')[-1])
-                new_number = last_number + 1
-            else:
-                new_number = 1
-            self.invoice_number = f'INV-{current_year}-{new_number:05d}'
-        super().save(*args, **kwargs)
-
-    def __str__(self) -> str:
-        name = self.customer.customer_name if self.customer else "Walk-in"
-        return f"{self.invoice_number} ({name})"
+            prefix = f'INV-{current_year}-'
+            
+            max_attempts = 5
+            for attempt in range(max_attempts):
+                with transaction.atomic():
+                    # FIX: Use all_objects to safely include soft-deleted invoices too
+                    last_invoice = SalesInvoice.all_objects.filter(
+                        invoice_number__startswith=prefix
+                    ).order_by('-id').first()
+                    
+                    if last_invoice:
+                        last_number = int(last_invoice.invoice_number.split('-')[-1])
+                        new_number = last_number + 1
+                    else:
+                        new_number = 1
+                        
+                    self.invoice_number = f'{prefix}{new_number:05d}'
+                    
+                    try:
+                        with transaction.atomic():
+                            super().save(*args, **kwargs)
+                        break  # success — exit retry loop
+                    except IntegrityError as e:
+                        if 'invoice_number' in str(e) and attempt < max_attempts - 1:
+                            # Collision — loop again to compute a fresh number
+                            continue
+                        raise
+        else:
+            super().save(*args, **kwargs)
 
 
 class SalesItem(models.Model):

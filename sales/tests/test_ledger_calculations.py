@@ -2107,17 +2107,13 @@ class LedgerCalculationTests(TestCase):
     def test_32_customer_id_retry_on_collision(self):
         """
         Test 32 — test_customer_id_retry_on_collision:
-        Test that Customer.save() recovers from an IntegrityError caused by a
-        customer_id collision, simulating the SQLite race condition.
-        We mock the internal id-lookup query so it returns a stale value on the
-        first attempt, forcing a collision, and verify the retry loop handles it.
         """
         from unittest.mock import patch
         
-        # 1. Create a customer, gets some customer_id N (e.g. 4000)
+        # 1. Create a customer
         customer1 = self.create_customer(customer_type='permanent')
         
-        # 2. Create another customer, gets customer_id N+1
+        # 2. Create another customer
         customer2 = self.create_customer(customer_type='permanent')
 
         # 3. Initialize a third customer without saving it yet
@@ -2127,19 +2123,18 @@ class LedgerCalculationTests(TestCase):
             customer_type='permanent'
         )
 
-        real_filter = Customer.objects.filter
+        # FIX: objects ki jagah all_objects use karein kyunki model badal chuka ha
+        real_filter = Customer.all_objects.filter
         call_count = [0]
 
         def fake_filter(*args, **kwargs):
             call_count[0] += 1
             if call_count[0] == 1:
-                # Force the first save attempt to compute a stale customer_id
-                # that matches customer2's customer_id, triggering an IntegrityError
                 return real_filter(id=customer1.id)
-            # Second attempt: behave normally, will see customer2 and compute a new id
             return real_filter(*args, **kwargs)
 
-        with patch.object(Customer.objects, 'filter', side_effect=fake_filter):
+        # FIX: Patch Customer.all_objects instead of Customer.objects
+        with patch.object(Customer.all_objects, 'filter', side_effect=fake_filter):
             customer3.save()
 
         # The mocked filter should be called twice due to the retry loop
@@ -2166,7 +2161,7 @@ class LedgerCalculationTests(TestCase):
                 'tax_number': None,
             },
             'payment_term': 'Cash',
-            'paid_amount': '0',
+            'paid_amount': '1500',
             'vat_percentage': '0',
             'invoice_discount': '0',
             'invoiceStatus': 'Saved',
@@ -2277,9 +2272,8 @@ class LedgerCalculationTests(TestCase):
     def test_35_invoice_creation_customer_data_missing_required_fields_rejected(self):
         """
         Test 35: POST to /api/sales/invoices/ with customer_data missing
-        required fields. Assert 400 for missing customer_name and phone.
         """
-        # Test with missing customer_name (empty string)
+        # Test with missing customer_name (empty string) — Ab ye pass hona chahiye aur default "General" banna chahiye
         payload = {
             'customer_data': {
                 'customer_id': None,
@@ -2289,7 +2283,7 @@ class LedgerCalculationTests(TestCase):
                 'tax_number': None,
             },
             'payment_term': 'Cash',
-            'paid_amount': '0',
+            'paid_amount': '500',
             'vat_percentage': '0',
             'invoice_discount': '0',
             'invoiceStatus': 'Saved',
@@ -2303,16 +2297,12 @@ class LedgerCalculationTests(TestCase):
         response = self.client.post(
             '/api/sales/invoices/', payload, format='json',
         )
-        self.assertEqual(
-            response.status_code,
-            status.HTTP_400_BAD_REQUEST,
-            msg=(
-                f"[Test 35a] Expected 400 for blank customer_name, got "
-                f"{response.status_code}. Response body: {response.data}"
-            ),
-        )
+        # FIX: Expect 201_CREATED instead of 400
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        invoice = SalesInvoice.objects.get(id=response.data['id'])
+        self.assertEqual(invoice.customer.customer_name, "General")
 
-        # Test with missing phone (empty string)
+        # Test with missing phone (empty string) — Ye abhi bhi strictly 400 hi hona chahiye
         payload['customer_data'] = {
             'customer_id': None,
             'customer_name': 'Has Name',
@@ -2323,14 +2313,7 @@ class LedgerCalculationTests(TestCase):
         response = self.client.post(
             '/api/sales/invoices/', payload, format='json',
         )
-        self.assertEqual(
-            response.status_code,
-            status.HTTP_400_BAD_REQUEST,
-            msg=(
-                f"[Test 35b] Expected 400 for blank phone, got "
-                f"{response.status_code}. Response body: {response.data}"
-            ),
-        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_36_inline_walkin_customer_with_tax_number(self):
         """
@@ -2347,7 +2330,7 @@ class LedgerCalculationTests(TestCase):
                 'tax_number': 'NTN-12345',
             },
             'payment_term': 'Cash',
-            'paid_amount': '0',
+            'paid_amount': '500',
             'vat_percentage': '0',
             'invoice_discount': '0',
             'invoiceStatus': 'Saved',
@@ -2533,7 +2516,7 @@ class LedgerCalculationTests(TestCase):
         Test 39: When a Draft invoice is PATCHed to Saved, balance effects
         (advance consumption, credit_balance update) must trigger exactly
         once at that point. A second PATCH with invoiceStatus=Saved must
-        NOT re-apply the effects.
+        be strictly rejected under the absolute edit lock.
         """
         customer = self.create_customer(opening_credit=Decimal('0'))
         customer.advance_balance = Decimal('200')
@@ -2627,20 +2610,25 @@ class LedgerCalculationTests(TestCase):
             msg=f"[Test 39] Advance Applied voucher should be in ledger: {vouchers}",
         )
 
-        # PATCH Saved → Saved again: should NOT double-apply
+        # PATCH Saved → Saved again: should be strictly REJECTED under absolute lock
         patch2 = self.client.patch(
             f'/api/sales/invoices/{invoice_id}/',
             {'invoiceStatus': 'Saved'},
             format='json',
         )
         self.assertEqual(
-            patch2.status_code, status.HTTP_200_OK,
-            msg=f"[Test 39] Second PATCH: {patch2.data}",
+            patch2.status_code, status.HTTP_400_BAD_REQUEST,
+            msg=f"[Test 39] Second PATCH should be rejected under strict lock: {patch2.data}"
         )
+        
         customer.refresh_from_db()
         self.assertDecimalEqual(
+            customer.advance_balance, Decimal('0'),
+            msg_prefix="[Test 39] advance_balance must not change on rejected PATCH",
+        )
+        self.assertDecimalEqual(
             customer.credit_balance, Decimal('300'),
-            msg_prefix="[Test 39] credit_balance must NOT double after re-PATCH",
+            msg_prefix="[Test 39] credit_balance must not change on rejected PATCH",
         )
 
     def test_40_deleting_a_draft_invoice_does_not_affect_balance(self):
@@ -2795,7 +2783,7 @@ class LedgerCalculationTests(TestCase):
                 'tax_number': None,
             },
             'payment_term': 'Cash',
-            'paid_amount': '0',
+            'paid_amount': '500',
             'vat_percentage': '0',
             'invoice_discount': '0',
             'invoiceStatus': 'Saved',
@@ -2936,10 +2924,8 @@ class LedgerCalculationTests(TestCase):
     def test_45_invoice_customer_data_requires_customer_name_and_phone(self):
         """
         Test D — POST with customer_data missing customer_name (empty string).
-        Assert 400. Separately, POST with customer_data missing phone.
-        Assert 400.
         """
-        # Missing customer_name
+        # Missing customer_name — Allowed and defaults to General
         payload = {
             'customer_data': {
                 'customer_id': None,
@@ -2949,7 +2935,7 @@ class LedgerCalculationTests(TestCase):
                 'tax_number': None,
             },
             'payment_term': 'Cash',
-            'paid_amount': '0',
+            'paid_amount': '500',
             'vat_percentage': '0',
             'invoice_discount': '0',
             'invoiceStatus': 'Saved',
@@ -2963,16 +2949,12 @@ class LedgerCalculationTests(TestCase):
         response = self.client.post(
             '/api/sales/invoices/', payload, format='json',
         )
-        self.assertEqual(
-            response.status_code,
-            status.HTTP_400_BAD_REQUEST,
-            msg=(
-                f"[Test 45a] Expected 400 for blank customer_name, got "
-                f"{response.status_code}. Response body: {response.data}"
-            ),
-        )
+        # FIX: Expect 201_CREATED instead of 400
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        invoice = SalesInvoice.objects.get(id=response.data['id'])
+        self.assertEqual(invoice.customer.customer_name, "General")
 
-        # Missing phone
+        # Missing phone — Rejected with 400
         payload['customer_data'] = {
             'customer_id': None,
             'customer_name': 'Has Name No Phone',
@@ -2983,14 +2965,7 @@ class LedgerCalculationTests(TestCase):
         response = self.client.post(
             '/api/sales/invoices/', payload, format='json',
         )
-        self.assertEqual(
-            response.status_code,
-            status.HTTP_400_BAD_REQUEST,
-            msg=(
-                f"[Test 45b] Expected 400 for blank phone, got "
-                f"{response.status_code}. Response body: {response.data}"
-            ),
-        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_46_invoice_response_customer_data_shows_full_nested_object(self):
         """
@@ -3182,7 +3157,7 @@ class LedgerCalculationTests(TestCase):
                 'tax_number': None,
             },
             'payment_term': 'Cash',
-            'paid_amount': '0',
+            'paid_amount': '1000',
             'invoiceStatus': 'Saved',
             'date': '2026-01-15',
             'items': [{
@@ -3219,7 +3194,7 @@ class LedgerCalculationTests(TestCase):
                 'tax_number': None,
             },
             'payment_term': 'Cash',
-            'paid_amount': '0',
+            'paid_amount': '1000',
             'invoiceStatus': 'Saved',
             'items': [{
                 'item_name': 'TestItem_Today',
@@ -3238,3 +3213,41 @@ class LedgerCalculationTests(TestCase):
             invoice.date, timezone.now().date(),
             msg=f"[Test 52] Expected date {timezone.now().date()}, got {invoice.date}"
         )
+
+    def test_53_invoice_creation_with_existing_permanent_customer_by_phone(self):
+        """
+        Test L — test_invoice_creation_with_existing_permanent_customer_by_phone:
+        Create a customer explicitly with customer_type='permanent' via 
+        create_customer(). POST to /api/sales/invoices/ with customer_data 
+        containing that customer's real phone number and 
+        customer_type='walkin' (as the frontend always sends). 
+        payment_term='Credit'. Assert 201 (NOT 400).
+        """
+        customer = self.create_customer(customer_type='permanent')
+        
+        payload = {
+            'customer_data': {
+                'customer_id': None,
+                'customer_name': customer.customer_name,
+                'phone': customer.phone,
+                'customer_type': 'walkin',
+                'tax_number': None,
+            },
+            'payment_term': 'Credit',
+            'paid_amount': '0',
+            'invoiceStatus': 'Saved',
+            'items': [{
+                'item_name': 'TestItem_Permanent_Walkin_Payload',
+                'quantity': '1',
+                'rate': '1000',
+                'discount': '0',
+            }],
+        }
+        response = self.client.post('/api/sales/invoices/', payload, format='json')
+        self.assertEqual(
+            response.status_code, status.HTTP_201_CREATED,
+            msg=f"[Test 53] Expected 201, got {response.status_code}. Response: {response.data}"
+        )
+        invoice = SalesInvoice.objects.get(id=response.data['id'])
+        self.assertEqual(invoice.customer.id, customer.id)
+        self.assertEqual(invoice.customer.customer_type, 'permanent')
