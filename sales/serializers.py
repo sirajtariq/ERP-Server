@@ -22,14 +22,10 @@ class CustomerListSerializer(serializers.ModelSerializer):
     customerName = serializers.CharField(source="customer_name", read_only=True)
     customerType = serializers.CharField(source="customer_type", read_only=True)
     Phone = serializers.CharField(source="phone", read_only=True)
-    creditBalance = serializers.DecimalField(
-        source="credit_balance", max_digits=12, decimal_places=2, read_only=True
-    )
-    advanceBalance = serializers.DecimalField(
-        source="advance_balance", max_digits=12, decimal_places=2, read_only=True
-    )
-    totalPaid = serializers.SerializerMethodField()
-    totalDue = serializers.SerializerMethodField()
+    creditBalance = serializers.DecimalField(source="credit_balance", max_digits=12, decimal_places=2, read_only=True)
+    advanceBalance = serializers.DecimalField(source="advance_balance", max_digits=12, decimal_places=2, read_only=True)
+    totalPaid = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    totalDue = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
 
     class Meta:
         model = Customer
@@ -48,10 +44,10 @@ class CustomerListSerializer(serializers.ModelSerializer):
 
     def get_totalPaid(self, obj):
         result = obj.invoices.aggregate(total=Sum("paid_amount"))
-        return float(result["total"] or 0)
+        return result["total"] or Decimal('0.00')
 
     def get_totalDue(self, obj):
-        return float(obj.credit_balance)
+        return obj.credit_balance
 
 
 class CustomerInvoiceNestedSerializer(serializers.ModelSerializer):
@@ -82,21 +78,14 @@ class CustomerSerializer(serializers.ModelSerializer):
     customerId = serializers.IntegerField(source="customer_id", read_only=True)
     customerName = serializers.CharField(source="customer_name")
     customerType = serializers.ChoiceField(source="customer_type",choices=['permanent', 'walkin'],required=True)
-    Phone = serializers.CharField(
-        source="phone",
-        required=True,
-        validators=[UniqueValidator(
-            queryset=Customer.objects.all(),
-            message="A customer with this phone number already exists."
-        )],
-    )
+    Phone = serializers.CharField(source="phone",required=True, validators=[UniqueValidator(queryset=Customer.objects.all(),message="Customer with this phone number already exists.")],)
     Address = serializers.CharField(source="address", required=False, allow_blank=True)
     openingCredit = serializers.DecimalField(source="opening_credit", max_digits=12, decimal_places=2, required=False, allow_null=True)
     openingNote = serializers.CharField(source="opening_note", required=False, allow_blank=True)
     taxNumber = serializers.CharField(source="tax_number", required=False, allow_null=True,allow_blank=True)
     creditBalance = serializers.DecimalField(source="credit_balance", max_digits=12, decimal_places=2, read_only=True)
     advanceBalance = serializers.DecimalField(source="advance_balance", max_digits=12, decimal_places=2, read_only=True)
-    totalPaid = serializers.SerializerMethodField()
+    totalPaid = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     createdAt = serializers.DateTimeField(source="created_at", read_only=True)
     updatedAt = serializers.DateTimeField(source="updated_at", read_only=True)
     invoices = CustomerInvoiceNestedSerializer(many=True, read_only=True)
@@ -108,7 +97,7 @@ class CustomerSerializer(serializers.ModelSerializer):
 
     def get_totalPaid(self, obj):
         result = obj.payments.aggregate(total=Sum("amount_received"))
-        return float(result["total"] or 0)
+        return result["total"] or Decimal('0.00')
 
 
 class SalesItemSerializer(serializers.ModelSerializer):

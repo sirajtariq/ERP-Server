@@ -177,7 +177,6 @@ class CustomerViewSet(viewsets.ModelViewSet):
     )
     @action(detail=True, methods=["get"], url_path="ledger")
     def ledger(self, request, **kwargs):
-        """Return full customer ledger with summary, transactions, and payment details."""
         customer = self.get_object()
         
         from_date = request.query_params.get('from')
@@ -188,11 +187,11 @@ class CustomerViewSet(viewsets.ModelViewSet):
             prior_payments = customer.payments.filter(date__lt=from_date)
             balance_before_range = Decimal(str(customer.opening_credit or '0.00'))
             for inv in prior_invoices:
-                balance_before_range += inv.net_total
+                balance_before_range += Decimal(str(inv.net_total))
             for pay in prior_payments:
-                balance_before_range -= pay.amount_received
+                balance_before_range -= Decimal(str(pay.amount_received))
             for inv in prior_invoices:
-                balance_before_range -= inv.advance_applied
+                balance_before_range -= Decimal(str(inv.advance_applied))
             opening_credit_for_range = balance_before_range
             opening_desc = "Balance Brought Forward"
             
@@ -205,33 +204,21 @@ class CustomerViewSet(viewsets.ModelViewSet):
             invoices = customer.invoices.filter(status="Saved").order_by("date", "id")
             payments = customer.payments.all().order_by("date", "id")
 
-        opening_credit = float(opening_credit_for_range)
+        opening_credit = Decimal(str(opening_credit_for_range))
 
-        # net_total is a Python @property, so we calculate aggregates in memory.
-        all_invoices = list(
-            invoices.select_related("customer").prefetch_related("items")
-        )
+        all_invoices = list(invoices.select_related("customer").prefetch_related("items"))
         all_payments = list(payments.select_related("invoice"))
 
-        credit_sales = float(sum(
-            inv.net_total for inv in all_invoices if inv.payment_term == "Credit"
-        ))
-        cash_return = float(sum(
-            float(inv.paid_amount) for inv in all_invoices if inv.payment_term == "Cash"
-        ))
-        total_paid = float(sum(
-            float(pay.amount_received) for pay in all_payments
-        ))
-        total_purchases = float(sum(inv.net_total for inv in all_invoices))
+        credit_sales = sum((Decimal(str(inv.net_total)) for inv in all_invoices if inv.payment_term == "Credit"), Decimal('0.00'))
+        cash_return = sum((Decimal(str(inv.paid_amount)) for inv in all_invoices if inv.payment_term == "Cash"), Decimal('0.00'))
+        total_paid = sum((Decimal(str(pay.amount_received)) for pay in all_payments), Decimal('0.00'))
+        total_purchases = sum((Decimal(str(inv.net_total)) for inv in all_invoices), Decimal('0.00'))
         total_invoices = len(all_invoices)
-        total_advance_applied = float(sum(
-            float(inv.advance_applied) for inv in all_invoices
-        ))
+        total_advance_applied = sum((Decimal(str(inv.advance_applied)) for inv in all_invoices), Decimal('0.00'))
 
         ledger_rows = []
 
-        # opening entry
-        if opening_credit != 0:
+        if opening_credit != Decimal('0.00'):
             opening_date = customer.created_at.date() if customer.created_at else None
             ledger_rows.append({
                 "date": opening_date.isoformat() if opening_date else None,
@@ -240,14 +227,13 @@ class CustomerViewSet(viewsets.ModelViewSet):
                 "referenceType": None,
                 "referenceId": None,
                 "debit": opening_credit,
-                "credit": 0,
-                "balance": 0,
+                "credit": Decimal('0.00'),
+                "balance": Decimal('0.00'),
                 "_sort_ts": customer.created_at,
             })
 
-        # debit entries from invoices
         for inv in all_invoices:
-            net = float(inv.net_total)
+            net = Decimal(str(inv.net_total))
             ledger_rows.append({
                 "date": inv.date.isoformat() if inv.date else None,
                 "voucher": inv.invoice_number,
@@ -255,11 +241,10 @@ class CustomerViewSet(viewsets.ModelViewSet):
                 "referenceType": "invoice",
                 "referenceId": inv.id,
                 "debit": net,
-                "credit": 0,
-                "balance": 0,
+                "credit": Decimal('0.00'),
+                "balance": Decimal('0.00'),
                 "_sort_ts": inv.created_at,
             })
-            # Advance-applied credit row (adjacent to its invoice)
             if inv.advance_applied > 0:
                 ledger_rows.append({
                     "date": inv.date.isoformat() if inv.date else None,
@@ -267,48 +252,44 @@ class CustomerViewSet(viewsets.ModelViewSet):
                     "description": "Advance Applied",
                     "referenceType": "invoice",
                     "referenceId": inv.id,
-                    "debit": 0,
-                    "credit": float(inv.advance_applied),
-                    "balance": 0,
+                    "debit": Decimal('0.00'),
+                    "credit": Decimal(str(inv.advance_applied)),
+                    "balance": Decimal('0.00'),
                     "_sort_ts": inv.created_at,
                 })
 
-        # credit entries from payments
         for pay in all_payments:
-            description = (
-                f"Payment - {pay.invoice.invoice_number}"
-                if pay.invoice else "General Payment"
-            )
+            description = f"Payment - {pay.invoice.invoice_number}" if pay.invoice else "General Payment"
             ledger_rows.append({
                 "date": pay.date.isoformat() if pay.date else None,
                 "voucher": pay.receipt_number,
                 "description": description,
                 "referenceType": "payment",
                 "referenceId": pay.id,
-                "debit": 0,
-                "credit": float(pay.amount_received),
-                "balance": 0,
+                "debit": Decimal('0.00'),
+                "credit": Decimal(str(pay.amount_received)),
+                "balance": Decimal('0.00'),
                 "_sort_ts": pay.created_at,
             })
 
-        # sort purely by actual datetime timestamp
         ledger_rows.sort(key=lambda r: r['_sort_ts'])
 
-        # unified running balance pass over ALL rows (including OPENING)
-        running_balance = Decimal('0')
+        running_balance = Decimal('0.00')
         for row in ledger_rows:
-            running_balance += Decimal(str(row['debit'])) - Decimal(str(row['credit']))
-            row['balance'] = float(running_balance)
+            # FIX: Ensure strict Decimal casting right before math operations
+            debit_val = Decimal(str(row['debit']))
+            credit_val = Decimal(str(row['credit']))
+            running_balance += debit_val - credit_val
+            row['balance'] = running_balance
 
-        # derive remaining/advance from the ledger's own final balance
-        final_balance = Decimal(str(ledger_rows[-1]['balance'])) if ledger_rows else Decimal('0')
+        final_balance = ledger_rows[-1]['balance'] if ledger_rows else Decimal('0.00')
 
         if final_balance >= 0:
-            remaining_balance = float(final_balance)
-            available_advance = 0.0
+            remaining_balance = final_balance
+            available_advance = Decimal('0.00')
         else:
-            remaining_balance = 0.0
-            available_advance = float(abs(final_balance))
+            remaining_balance = Decimal('0.00')
+            available_advance = abs(final_balance)
 
         summary = {
             "creditSales": credit_sales,
@@ -332,7 +313,6 @@ class CustomerViewSet(viewsets.ModelViewSet):
             "remainingBalance": remaining_balance,
         }
 
-        # remove internal keys before returning
         for row in ledger_rows:
             row.pop('_sort_ts', None)
 
