@@ -200,17 +200,21 @@ class CustomerDataField(serializers.Field):
             )
 
         customer_name = (data.get('customer_name') or '').strip()
+        if not customer_name:
+            customer_name = "General"
         phone = (data.get('phone') or '').strip()
         customer_type = data.get('customer_type')
         tax_number = data.get('tax_number') or None
 
-        if not customer_name:
-            raise serializers.ValidationError("customer_data.customer_name is required.")
+        # if not customer_name:
+        #     raise serializers.ValidationError("customer_data.customer_name is required.")
         if not phone:
             raise serializers.ValidationError("customer_data.phone is required.")
             
-        existing = Customer.objects.filter(phone=phone).first()
+        existing = Customer.all_objects.filter(phone=phone).first()
         if existing:
+            if getattr(existing, 'is_deleted', False):
+                existing.restore()
             return existing
 
         if customer_type != 'walkin':

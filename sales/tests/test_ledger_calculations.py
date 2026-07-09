@@ -2272,9 +2272,8 @@ class LedgerCalculationTests(TestCase):
     def test_35_invoice_creation_customer_data_missing_required_fields_rejected(self):
         """
         Test 35: POST to /api/sales/invoices/ with customer_data missing
-        required fields. Assert 400 for missing customer_name and phone.
         """
-        # Test with missing customer_name (empty string)
+        # Test with missing customer_name (empty string) — Ab ye pass hona chahiye aur default "General" banna chahiye
         payload = {
             'customer_data': {
                 'customer_id': None,
@@ -2298,16 +2297,12 @@ class LedgerCalculationTests(TestCase):
         response = self.client.post(
             '/api/sales/invoices/', payload, format='json',
         )
-        self.assertEqual(
-            response.status_code,
-            status.HTTP_400_BAD_REQUEST,
-            msg=(
-                f"[Test 35a] Expected 400 for blank customer_name, got "
-                f"{response.status_code}. Response body: {response.data}"
-            ),
-        )
+        # FIX: Expect 201_CREATED instead of 400
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        invoice = SalesInvoice.objects.get(id=response.data['id'])
+        self.assertEqual(invoice.customer.customer_name, "General")
 
-        # Test with missing phone (empty string)
+        # Test with missing phone (empty string) — Ye abhi bhi strictly 400 hi hona chahiye
         payload['customer_data'] = {
             'customer_id': None,
             'customer_name': 'Has Name',
@@ -2318,14 +2313,7 @@ class LedgerCalculationTests(TestCase):
         response = self.client.post(
             '/api/sales/invoices/', payload, format='json',
         )
-        self.assertEqual(
-            response.status_code,
-            status.HTTP_400_BAD_REQUEST,
-            msg=(
-                f"[Test 35b] Expected 400 for blank phone, got "
-                f"{response.status_code}. Response body: {response.data}"
-            ),
-        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_36_inline_walkin_customer_with_tax_number(self):
         """
@@ -2931,10 +2919,8 @@ class LedgerCalculationTests(TestCase):
     def test_45_invoice_customer_data_requires_customer_name_and_phone(self):
         """
         Test D — POST with customer_data missing customer_name (empty string).
-        Assert 400. Separately, POST with customer_data missing phone.
-        Assert 400.
         """
-        # Missing customer_name
+        # Missing customer_name — Allowed and defaults to General
         payload = {
             'customer_data': {
                 'customer_id': None,
@@ -2958,16 +2944,12 @@ class LedgerCalculationTests(TestCase):
         response = self.client.post(
             '/api/sales/invoices/', payload, format='json',
         )
-        self.assertEqual(
-            response.status_code,
-            status.HTTP_400_BAD_REQUEST,
-            msg=(
-                f"[Test 45a] Expected 400 for blank customer_name, got "
-                f"{response.status_code}. Response body: {response.data}"
-            ),
-        )
+        # FIX: Expect 201_CREATED instead of 400
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        invoice = SalesInvoice.objects.get(id=response.data['id'])
+        self.assertEqual(invoice.customer.customer_name, "General")
 
-        # Missing phone
+        # Missing phone — Rejected with 400
         payload['customer_data'] = {
             'customer_id': None,
             'customer_name': 'Has Name No Phone',
@@ -2978,14 +2960,7 @@ class LedgerCalculationTests(TestCase):
         response = self.client.post(
             '/api/sales/invoices/', payload, format='json',
         )
-        self.assertEqual(
-            response.status_code,
-            status.HTTP_400_BAD_REQUEST,
-            msg=(
-                f"[Test 45b] Expected 400 for blank phone, got "
-                f"{response.status_code}. Response body: {response.data}"
-            ),
-        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_46_invoice_response_customer_data_shows_full_nested_object(self):
         """
