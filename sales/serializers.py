@@ -291,6 +291,11 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         return compute_payment_status(obj)
 
     def validate(self, attrs):
+        if self.instance and self.instance.status == 'Saved':
+            raise serializers.ValidationError(
+                {"invoiceStatus": "Saved invoices cannot be modified. To make changes, please delete the invoice to reverse balances and create a new one."}
+            )
+            
         customer = attrs.get('customer')
         payment_term = attrs.get('payment_term')
 
@@ -303,7 +308,6 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         if not customer:
             raise serializers.ValidationError("customer_data is required.")
 
-        # Check k customer dict ha ya model instance
         if isinstance(customer, dict):
             c_type = customer.get('customer_type')
         else:
@@ -311,6 +315,59 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
 
         if c_type == 'walkin' and payment_term == 'Credit':
             raise serializers.ValidationError("Walk-in customers can only pay via Cash.")
+
+        items_list = attrs.get('items')
+        if items_list is None and self.instance:
+            items_list = self.instance.items.all()
+        elif items_list is None:
+            items_list = []
+
+        # Validation: Ensure the invoice has at least one item
+        if len(items_list) == 0:
+            raise serializers.ValidationError({"items": "An invoice must contain at least one item."})
+
+        subtotal = Decimal('0.00')
+        total_line_discount = Decimal('0.00')
+
+        for item in items_list:
+            is_dict = isinstance(item, dict)
+            qty = Decimal(str(item.get('quantity', 0) if is_dict else getattr(item, 'quantity', 0)))
+            rate = Decimal(str(item.get('rate', 0) if is_dict else getattr(item, 'rate', 0)))
+            disc = Decimal(str(item.get('discount', 0) if is_dict else getattr(item, 'discount', 0)))
+            
+            # Validation: Prevent zero or negative values in quantity/rate
+            if qty <= 0 or rate <= 0:
+                raise serializers.ValidationError({"items": "Quantity and rate must be greater than zero."})
+            if disc < 0:
+                raise serializers.ValidationError({"items": "Line item discount cannot be negative."})
+            
+            subtotal += qty * rate
+            total_line_discount += disc
+
+        vat_percentage = Decimal(str(attrs.get('vat_percentage', self.instance.vat_percentage if self.instance else 0)))
+        invoice_discount = Decimal(str(attrs.get('invoice_discount', self.instance.invoice_discount if self.instance else 0)))
+
+        if invoice_discount < 0:
+            raise serializers.ValidationError({"invoice_discount": "Invoice discount cannot be negative."})
+
+        base_amount = subtotal - total_line_discount
+        tax_amount = base_amount * (vat_percentage / Decimal('100'))
+        net_total = base_amount + tax_amount - invoice_discount
+        
+        # Validation: Prevent discount from exceeding the bill total
+        if net_total < 0:
+            raise serializers.ValidationError(
+                {"invoice_discount": f"Invoice discount cannot exceed the net total amount ({base_amount + tax_amount:.2f})."}
+            )
+
+        paid_amount = Decimal(str(attrs.get('paid_amount', self.instance.paid_amount if self.instance else 0)))
+
+        if c_type == 'walkin':
+            if paid_amount != net_total:
+                raise serializers.ValidationError(
+                    f"Walk-in invoices must be paid in full. "
+                    f"Expected net total: {net_total:.2f}, received paid_amount: {paid_amount:.2f}."
+                )
 
         return attrs
 
@@ -369,6 +426,8 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             SalesItem.objects.create(invoice=invoice, **item_data)
 
         if invoice.status == 'Saved':
+            # Pull freshly calculated database fields before running accounting side-effects
+            invoice.refresh_from_db()
             self._apply_invoice_balance_effects(invoice, original_paid_amount)
 
         return invoice

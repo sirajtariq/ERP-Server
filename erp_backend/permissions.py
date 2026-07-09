@@ -73,3 +73,20 @@ class IsPurchaseUser(BasePermission):
         if user.is_superuser or _user_in_group(user, ADMIN_GROUP):
             return True
         return _user_in_group(user, PURCHASE_GROUP)
+
+class OnlyAdminCanDelete(BasePermission):
+    """
+    Ensure only superusers or Admin group members can perform delete actions,
+    effectively blocking normal sales/purchase users from moving records to trash.
+    """
+
+    message = "You do not have permission to delete or move this record to trash."
+
+    def has_permission(self, request, view) -> bool:
+        if request.method == "DELETE":
+            user = request.user
+            if not user or not user.is_authenticated:
+                return False
+            return user.is_superuser or _user_in_group(user, ADMIN_GROUP)
+        
+        return True

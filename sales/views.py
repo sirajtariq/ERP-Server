@@ -16,7 +16,7 @@ from rest_framework.filters import OrderingFilter
 from rest_framework.response import Response
 from rest_framework import status as drf_status
 
-from erp_backend.permissions import IsSalesUser
+from erp_backend.permissions import IsSalesUser, OnlyAdminCanDelete
 from sales.models import Customer, PaymentReceived, SalesInvoice, SalesItem
 from sales.pagination import CustomPageNumberPagination
 from sales.serializers import (
@@ -39,7 +39,7 @@ class CustomerViewSet(viewsets.ModelViewSet):
 
     queryset = Customer.objects.prefetch_related("invoices").all()
     serializer_class = CustomerSerializer
-    permission_classes = [IsSalesUser]
+    permission_classes = [IsSalesUser, OnlyAdminCanDelete]
     lookup_field = "customer_id"
     pagination_class = CustomPageNumberPagination
     filter_backends = [OrderingFilter]
@@ -385,7 +385,7 @@ class SalesInvoiceViewSet(viewsets.ModelViewSet):
         "items"
     )
     serializer_class = SalesInvoiceSerializer
-    permission_classes = [IsSalesUser]
+    permission_classes = [IsSalesUser, OnlyAdminCanDelete]
 
     def get_serializer_class(self):
         if self.action == "list":
@@ -559,13 +559,27 @@ class SalesInvoiceViewSet(viewsets.ModelViewSet):
         invoice.delete()  # actual hard delete via Django's default
         return Response({"message": "Permanently deleted."})
 
+    @swagger_auto_schema(operation_description="Get all invoices with full nested items array (Future-Proof/Export API)")
+    @action(detail=False, methods=['get'], url_path='all-with-items')
+    def all_with_items(self, request):
+        # Filtering aur ordering automatic standard viewset ki apply hogi
+        queryset = self.filter_queryset(self.get_queryset())
+        
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = SalesInvoiceSerializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+            
+        serializer = SalesInvoiceSerializer(queryset, many=True)
+        return Response(serializer.data)
+
 
 class SalesItemViewSet(viewsets.ModelViewSet):
     """CRUD operations for standalone sales line items."""
 
     queryset = SalesItem.objects.select_related("invoice")
     serializer_class = SalesItemSerializer
-    permission_classes = [IsSalesUser]
+    permission_classes = [IsSalesUser, OnlyAdminCanDelete]
 
     @swagger_auto_schema(operation_description=SALES_PERMISSION_NOTE)
     def list(self, request, *args, **kwargs):
@@ -597,7 +611,7 @@ class PaymentReceivedViewSet(viewsets.ModelViewSet):
 
     queryset = PaymentReceived.objects.select_related('customer', 'invoice').all()
     serializer_class = PaymentReceivedSerializer
-    permission_classes = [IsSalesUser]
+    permission_classes = [IsSalesUser, OnlyAdminCanDelete]
     pagination_class = CustomPageNumberPagination
     filter_backends = [OrderingFilter]
     ordering_fields = "__all__"

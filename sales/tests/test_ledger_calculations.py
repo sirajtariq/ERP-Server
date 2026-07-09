@@ -2161,7 +2161,7 @@ class LedgerCalculationTests(TestCase):
                 'tax_number': None,
             },
             'payment_term': 'Cash',
-            'paid_amount': '0',
+            'paid_amount': '1500',
             'vat_percentage': '0',
             'invoice_discount': '0',
             'invoiceStatus': 'Saved',
@@ -2283,7 +2283,7 @@ class LedgerCalculationTests(TestCase):
                 'tax_number': None,
             },
             'payment_term': 'Cash',
-            'paid_amount': '0',
+            'paid_amount': '500',
             'vat_percentage': '0',
             'invoice_discount': '0',
             'invoiceStatus': 'Saved',
@@ -2330,7 +2330,7 @@ class LedgerCalculationTests(TestCase):
                 'tax_number': 'NTN-12345',
             },
             'payment_term': 'Cash',
-            'paid_amount': '0',
+            'paid_amount': '500',
             'vat_percentage': '0',
             'invoice_discount': '0',
             'invoiceStatus': 'Saved',
@@ -2516,7 +2516,7 @@ class LedgerCalculationTests(TestCase):
         Test 39: When a Draft invoice is PATCHed to Saved, balance effects
         (advance consumption, credit_balance update) must trigger exactly
         once at that point. A second PATCH with invoiceStatus=Saved must
-        NOT re-apply the effects.
+        be strictly rejected under the absolute edit lock.
         """
         customer = self.create_customer(opening_credit=Decimal('0'))
         customer.advance_balance = Decimal('200')
@@ -2610,20 +2610,25 @@ class LedgerCalculationTests(TestCase):
             msg=f"[Test 39] Advance Applied voucher should be in ledger: {vouchers}",
         )
 
-        # PATCH Saved → Saved again: should NOT double-apply
+        # PATCH Saved → Saved again: should be strictly REJECTED under absolute lock
         patch2 = self.client.patch(
             f'/api/sales/invoices/{invoice_id}/',
             {'invoiceStatus': 'Saved'},
             format='json',
         )
         self.assertEqual(
-            patch2.status_code, status.HTTP_200_OK,
-            msg=f"[Test 39] Second PATCH: {patch2.data}",
+            patch2.status_code, status.HTTP_400_BAD_REQUEST,
+            msg=f"[Test 39] Second PATCH should be rejected under strict lock: {patch2.data}"
         )
+        
         customer.refresh_from_db()
         self.assertDecimalEqual(
+            customer.advance_balance, Decimal('0'),
+            msg_prefix="[Test 39] advance_balance must not change on rejected PATCH",
+        )
+        self.assertDecimalEqual(
             customer.credit_balance, Decimal('300'),
-            msg_prefix="[Test 39] credit_balance must NOT double after re-PATCH",
+            msg_prefix="[Test 39] credit_balance must not change on rejected PATCH",
         )
 
     def test_40_deleting_a_draft_invoice_does_not_affect_balance(self):
@@ -2778,7 +2783,7 @@ class LedgerCalculationTests(TestCase):
                 'tax_number': None,
             },
             'payment_term': 'Cash',
-            'paid_amount': '0',
+            'paid_amount': '500',
             'vat_percentage': '0',
             'invoice_discount': '0',
             'invoiceStatus': 'Saved',
@@ -2930,7 +2935,7 @@ class LedgerCalculationTests(TestCase):
                 'tax_number': None,
             },
             'payment_term': 'Cash',
-            'paid_amount': '0',
+            'paid_amount': '500',
             'vat_percentage': '0',
             'invoice_discount': '0',
             'invoiceStatus': 'Saved',
@@ -3152,7 +3157,7 @@ class LedgerCalculationTests(TestCase):
                 'tax_number': None,
             },
             'payment_term': 'Cash',
-            'paid_amount': '0',
+            'paid_amount': '1000',
             'invoiceStatus': 'Saved',
             'date': '2026-01-15',
             'items': [{
@@ -3189,7 +3194,7 @@ class LedgerCalculationTests(TestCase):
                 'tax_number': None,
             },
             'payment_term': 'Cash',
-            'paid_amount': '0',
+            'paid_amount': '1000',
             'invoiceStatus': 'Saved',
             'items': [{
                 'item_name': 'TestItem_Today',
