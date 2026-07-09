@@ -7,6 +7,7 @@ single request can create or replace an invoice together with its items.
 
 from decimal import Decimal
 
+from django.db import transaction
 from django.db.models import Sum
 from rest_framework import serializers
 from rest_framework.validators import UniqueValidator
@@ -530,34 +531,34 @@ class PaymentReceivedSerializer(serializers.ModelSerializer):
         amount = validated_data['amount_received']
         invoice = validated_data.get('invoice')
 
-        result = self._apply_payment(customer, amount, invoice)
-        validated_data['balance_after'] = result['balance_after']
-        validated_data['applied_to_invoice'] = result['applied_to_invoice']
-        validated_data['applied_to_credit'] = result['applied_to_credit']
-        validated_data['applied_to_advance'] = result['applied_to_advance']
+        with transaction.atomic():
+            result = self._apply_payment(customer, amount, invoice)
+            validated_data['balance_after'] = result['balance_after']
+            validated_data['applied_to_invoice'] = result['applied_to_invoice']
+            validated_data['applied_to_credit'] = result['applied_to_credit']
+            validated_data['applied_to_advance'] = result['applied_to_advance']
 
-        return super().create(validated_data)
+            return super().create(validated_data)
 
     def update(self, instance, validated_data):
-        # Reverse the OLD payment using its STORED split values
-        self._reverse_payment(
-            instance.customer,
-            instance.invoice,
-            instance.applied_to_invoice,
-            instance.applied_to_credit,
-            instance.applied_to_advance,
-        )
+        with transaction.atomic():
+            self._reverse_payment(
+                instance.customer,
+                instance.invoice,
+                instance.applied_to_invoice,
+                instance.applied_to_credit,
+                instance.applied_to_advance,
+            )
 
-        # Apply the NEW payment values fresh
-        new_customer = validated_data.get('customer', instance.customer)
-        new_amount = validated_data.get('amount_received', instance.amount_received)
-        new_invoice = validated_data.get('invoice', instance.invoice)
+            new_customer = validated_data.get('customer', instance.customer)
+            new_amount = validated_data.get('amount_received', instance.amount_received)
+            new_invoice = validated_data.get('invoice', instance.invoice)
 
-        result = self._apply_payment(new_customer, new_amount, new_invoice)
-        validated_data['balance_after'] = result['balance_after']
-        validated_data['applied_to_invoice'] = result['applied_to_invoice']
-        validated_data['applied_to_credit'] = result['applied_to_credit']
-        validated_data['applied_to_advance'] = result['applied_to_advance']
+            result = self._apply_payment(new_customer, new_amount, new_invoice)
+            validated_data['balance_after'] = result['balance_after']
+            validated_data['applied_to_invoice'] = result['applied_to_invoice']
+            validated_data['applied_to_credit'] = result['applied_to_credit']
+            validated_data['applied_to_advance'] = result['applied_to_advance']
 
-        return super().update(instance, validated_data)
+            return super().update(instance, validated_data)
 

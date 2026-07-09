@@ -499,16 +499,20 @@ class SalesInvoiceViewSet(viewsets.ModelViewSet):
     def destroy(self, request, *args, **kwargs):
         invoice = self.get_object()
 
-        if invoice.status == 'Saved':
-            if invoice.customer and invoice.payment_term == 'Credit':
-                invoice.customer.credit_balance -= invoice.balance_due
-                invoice.customer.save(update_fields=['credit_balance'])
+        # FIX: Atomic transaction block
+        with transaction.atomic():
+            if invoice.status == 'Saved':
+                if invoice.customer and invoice.payment_term == 'Credit':
+                    invoice.customer.refresh_from_db(fields=['credit_balance'])
+                    invoice.customer.credit_balance -= invoice.balance_due
+                    invoice.customer.save(update_fields=['credit_balance'])
 
-            if invoice.customer and invoice.advance_applied > 0:
-                invoice.customer.advance_balance += invoice.advance_applied
-                invoice.customer.save(update_fields=['advance_balance'])
+                if invoice.customer and invoice.advance_applied > 0:
+                    invoice.customer.refresh_from_db(fields=['advance_balance'])
+                    invoice.customer.advance_balance += invoice.advance_applied
+                    invoice.customer.save(update_fields=['advance_balance'])
 
-        invoice.soft_delete()
+            invoice.soft_delete()
 
         return Response(
             {"message": "Invoice moved to trash. Customer balance adjusted."},
@@ -526,20 +530,24 @@ class SalesInvoiceViewSet(viewsets.ModelViewSet):
     @swagger_auto_schema(operation_description=SALES_PERMISSION_NOTE)
     @action(detail=True, methods=['post'], url_path='restore')
     def restore(self, request, pk=None):
-        invoice = SalesInvoice.all_objects.filter(id=pk, is_deleted=True).first()
-        if not invoice:
-            return Response({"error": "Not found in trash."}, status=drf_status.HTTP_404_NOT_FOUND)
+        # FIX: Atomic transaction block
+        with transaction.atomic():
+            invoice = SalesInvoice.all_objects.filter(id=pk, is_deleted=True).first()
+            if not invoice:
+                return Response({"error": "Not found in trash."}, status=drf_status.HTTP_404_NOT_FOUND)
 
-        if invoice.status == 'Saved':
-            if invoice.customer and invoice.payment_term == 'Credit':
-                invoice.customer.credit_balance += invoice.balance_due
-                invoice.customer.save(update_fields=['credit_balance'])
+            if invoice.status == 'Saved':
+                if invoice.customer and invoice.payment_term == 'Credit':
+                    invoice.customer.refresh_from_db(fields=['credit_balance'])
+                    invoice.customer.credit_balance += invoice.balance_due
+                    invoice.customer.save(update_fields=['credit_balance'])
 
-            if invoice.customer and invoice.advance_applied > 0:
-                invoice.customer.advance_balance -= invoice.advance_applied
-                invoice.customer.save(update_fields=['advance_balance'])
+                if invoice.customer and invoice.advance_applied > 0:
+                    invoice.customer.refresh_from_db(fields=['advance_balance'])
+                    invoice.customer.advance_balance -= invoice.advance_applied
+                    invoice.customer.save(update_fields=['advance_balance'])
 
-        invoice.restore()
+            invoice.restore()
 
         return Response({"message": "Invoice restored, balance re-applied."})
 
@@ -676,12 +684,16 @@ class PaymentReceivedViewSet(viewsets.ModelViewSet):
     def destroy(self, request, *args, **kwargs):
         payment = self.get_object()
         serializer = self.get_serializer()
-        serializer._reverse_payment(
-            payment.customer, payment.invoice,
-            payment.applied_to_invoice, payment.applied_to_credit,
-            payment.applied_to_advance
-        )
-        payment.soft_delete()
+        
+        # FIX: Atomic execution for balance safety
+        with transaction.atomic():
+            serializer._reverse_payment(
+                payment.customer, payment.invoice,
+                payment.applied_to_invoice, payment.applied_to_credit,
+                payment.applied_to_advance
+            )
+            payment.soft_delete()
+            
         return Response(
             {"message": "Payment moved to trash. Balances adjusted."},
             status=drf_status.HTTP_200_OK,
@@ -698,25 +710,28 @@ class PaymentReceivedViewSet(viewsets.ModelViewSet):
     @swagger_auto_schema(operation_description=SALES_PERMISSION_NOTE)
     @action(detail=True, methods=['post'], url_path='restore')
     def restore(self, request, pk=None):
-        payment = PaymentReceived.all_objects.filter(
-            id=pk, is_deleted=True
-        ).first()
-        if not payment:
-            return Response(
-                {"error": "Not found in trash."},
-                status=drf_status.HTTP_404_NOT_FOUND,
+        # FIX: Atomic execution
+        with transaction.atomic():
+            payment = PaymentReceived.all_objects.filter(
+                id=pk, is_deleted=True
+            ).first()
+            if not payment:
+                return Response(
+                    {"error": "Not found in trash."},
+                    status=drf_status.HTTP_404_NOT_FOUND,
+                )
+            serializer = self.get_serializer()
+            result = serializer._apply_payment(
+                payment.customer, payment.amount_received, payment.invoice
             )
-        serializer = self.get_serializer()
-        result = serializer._apply_payment(
-            payment.customer, payment.amount_received, payment.invoice
-        )
-        payment.balance_after = result['balance_after']
-        payment.applied_to_invoice = result['applied_to_invoice']
-        payment.applied_to_credit = result['applied_to_credit']
-        payment.applied_to_advance = result['applied_to_advance']
-        payment.save(update_fields=[
-            'balance_after', 'applied_to_invoice',
-            'applied_to_credit', 'applied_to_advance',
-        ])
-        payment.restore()
+            payment.balance_after = result['balance_after']
+            payment.applied_to_invoice = result['applied_to_invoice']
+            payment.applied_to_credit = result['applied_to_credit']
+            payment.applied_to_advance = result['applied_to_advance']
+            payment.save(update_fields=[
+                'balance_after', 'applied_to_invoice',
+                'applied_to_credit', 'applied_to_advance',
+            ])
+            payment.restore()
+            
         return Response({"message": "Payment restored, balances re-applied."})
