@@ -291,11 +291,15 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         return compute_payment_status(obj)
 
     def validate(self, attrs):
+        from decimal import Decimal
+
+        # 1. Absolute Hard Lock: Reject any modification if the invoice is already 'Saved'
         if self.instance and self.instance.status == 'Saved':
             raise serializers.ValidationError(
-                {"invoiceStatus": "Saved invoices cannot be modified. To make changes, please delete the invoice to reverse balances and create a new one."}
+                {"invoiceStatus": "Saved invoices are locked and cannot be modified. To make changes, delete the invoice to reverse balances and recreate it."}
             )
-            
+
+        # 2. Extract or resolve customer and payment term for creation or update instances
         customer = attrs.get('customer')
         payment_term = attrs.get('payment_term')
 
@@ -308,24 +312,25 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         if not customer:
             raise serializers.ValidationError("customer_data is required.")
 
+        # Resolve customer type and current advance balance from DB
         if isinstance(customer, dict):
             c_type = customer.get('customer_type')
+            advance_balance = Decimal('0.00')
         else:
             c_type = customer.customer_type
+            advance_balance = Decimal(str(getattr(customer, 'advance_balance', 0)))
 
-        if c_type == 'walkin' and payment_term == 'Credit':
-            raise serializers.ValidationError("Walk-in customers can only pay via Cash.")
-
+        # 3. Validation: Ensure the invoice has at least one item
         items_list = attrs.get('items')
         if items_list is None and self.instance:
-            items_list = self.instance.items.all()
+            items_list = list(self.instance.items.all())
         elif items_list is None:
             items_list = []
 
-        # Validation: Ensure the invoice has at least one item
         if len(items_list) == 0:
             raise serializers.ValidationError({"items": "An invoice must contain at least one item."})
 
+        # 4. Line items validation and calculations
         subtotal = Decimal('0.00')
         total_line_discount = Decimal('0.00')
 
@@ -335,7 +340,6 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             rate = Decimal(str(item.get('rate', 0) if is_dict else getattr(item, 'rate', 0)))
             disc = Decimal(str(item.get('discount', 0) if is_dict else getattr(item, 'discount', 0)))
             
-            # Validation: Prevent zero or negative values in quantity/rate
             if qty <= 0 or rate <= 0:
                 raise serializers.ValidationError({"items": "Quantity and rate must be greater than zero."})
             if disc < 0:
@@ -344,6 +348,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             subtotal += qty * rate
             total_line_discount += disc
 
+        # 5. Header level charges and discounts calculations
         vat_percentage = Decimal(str(attrs.get('vat_percentage', self.instance.vat_percentage if self.instance else 0)))
         invoice_discount = Decimal(str(attrs.get('invoice_discount', self.instance.invoice_discount if self.instance else 0)))
 
@@ -354,7 +359,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         tax_amount = base_amount * (vat_percentage / Decimal('100'))
         net_total = base_amount + tax_amount - invoice_discount
         
-        # Validation: Prevent discount from exceeding the bill total
+        # Prevent discount from driving net total into negative
         if net_total < 0:
             raise serializers.ValidationError(
                 {"invoice_discount": f"Invoice discount cannot exceed the net total amount ({base_amount + tax_amount:.2f})."}
@@ -362,11 +367,30 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
 
         paid_amount = Decimal(str(attrs.get('paid_amount', self.instance.paid_amount if self.instance else 0)))
 
+        # 6. Business Rule enforcement per customer type and term mapping
         if c_type == 'walkin':
+            if payment_term != 'Cash':
+                raise serializers.ValidationError({"payment_term": "Walk-in customers can only pay via Cash."})
             if paid_amount != net_total:
                 raise serializers.ValidationError(
                     f"Walk-in invoices must be paid in full. "
                     f"Expected net total: {net_total:.2f}, received paid_amount: {paid_amount:.2f}."
+                )
+        else:
+            effective_coverage = paid_amount + advance_balance
+
+            # Case 1: Coverage is less than bill total -> Must be Credit
+            if effective_coverage < net_total and payment_term == 'Cash':
+                raise serializers.ValidationError(
+                    {"payment_term": f"Remaining balance detected after applying available advance ({advance_balance:.2f}). "
+                                     f"Payment term must be 'Credit' for partial or unpaid balances."}
+                )
+
+            # Case 2: Coverage clears or exceeds the bill -> Must be Cash
+            if effective_coverage >= net_total and payment_term == 'Credit':
+                raise serializers.ValidationError(
+                    {"payment_term": f"Invoice is fully covered by the paid amount and available advance ({advance_balance:.2f}). "
+                                     f"Payment term must be 'Cash' as no new debt is created."}
                 )
 
         return attrs
