@@ -24,8 +24,8 @@ class CustomerListSerializer(serializers.ModelSerializer):
     Phone = serializers.CharField(source="phone", read_only=True)
     creditBalance = serializers.DecimalField(source="credit_balance", max_digits=12, decimal_places=2, read_only=True)
     advanceBalance = serializers.DecimalField(source="advance_balance", max_digits=12, decimal_places=2, read_only=True)
-    totalPaid = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
-    totalDue = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    totalPaid = serializers.DecimalField(source="annotated_total_paid", max_digits=12, decimal_places=2, read_only=True)
+    totalDue = serializers.DecimalField(source="credit_balance", max_digits=12, decimal_places=2, read_only=True)
 
     class Meta:
         model = Customer
@@ -42,9 +42,9 @@ class CustomerListSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = fields
 
-    def get_totalPaid(self, obj):
-        result = obj.invoices.aggregate(total=Sum("paid_amount"))
-        return result["total"] or Decimal('0.00')
+    # def get_totalPaid(self, obj):
+    #     result = obj.invoices.aggregate(total=Sum("paid_amount"))
+    #     return result["total"] or Decimal('0.00')
 
     def get_totalDue(self, obj):
         return obj.credit_balance

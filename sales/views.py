@@ -6,7 +6,8 @@ from decimal import Decimal
 
 from django.db import transaction
 
-from django.db.models import Sum
+from django.db.models import Sum, DecimalField
+from django.db.models.functions import Coalesce
 from drf_yasg import openapi
 from drf_yasg.utils import swagger_auto_schema
 from rest_framework import viewsets
@@ -51,7 +52,15 @@ class CustomerViewSet(viewsets.ModelViewSet):
     #     return CustomerSerializer
 
     def get_queryset(self):
-        qs = super().get_queryset()
+        # Database level par hi single query me total sum nikalna
+        qs = Customer.objects.annotate(
+            annotated_total_paid=Coalesce(
+                Sum('invoices__paid_amount'), 
+                Decimal('0.00'), 
+                output_field=DecimalField()
+            )
+        )
+        
         name = self.request.query_params.get("name")
         customer_type = self.request.query_params.get("type")
         if name:
