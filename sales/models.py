@@ -44,29 +44,27 @@ class Customer(SoftDeleteModel):
                 with transaction.atomic():
                     if self.customer_type == 'walkin':
                         start_id = 8000
-                        last = Customer.objects.filter(
+                        # FIX: Use all_objects instead of objects to see soft-deleted records
+                        last = Customer.all_objects.filter(
                             customer_type='walkin'
                         ).order_by('-customer_id').first()
                     else:
                         start_id = 4000
-                        last = Customer.objects.filter(
+                        # FIX: Use all_objects instead of objects to see soft-deleted records
+                        last = Customer.all_objects.filter(
                             customer_type='permanent'
                         ).order_by('-customer_id').first()
 
                     self.customer_id = (last.customer_id + 1) if last else start_id
 
                     try:
-                        # Use a savepoint so a failed insert here doesn't
-                        # poison the outer transaction/request.
                         with transaction.atomic():
                             super(Customer, self).save(*args, **kwargs)
                         break  # success — exit retry loop
                     except IntegrityError as e:
                         if 'customer_id' in str(e) and attempt < max_attempts - 1:
-                            # Collision — loop again and recompute a fresh id
                             continue
-                        raise  # give up after max_attempts, or it's a
-                               # different/unrelated IntegrityError
+                        raise  
         else:
             super().save(*args, **kwargs)
 

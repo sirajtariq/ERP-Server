@@ -2107,17 +2107,13 @@ class LedgerCalculationTests(TestCase):
     def test_32_customer_id_retry_on_collision(self):
         """
         Test 32 — test_customer_id_retry_on_collision:
-        Test that Customer.save() recovers from an IntegrityError caused by a
-        customer_id collision, simulating the SQLite race condition.
-        We mock the internal id-lookup query so it returns a stale value on the
-        first attempt, forcing a collision, and verify the retry loop handles it.
         """
         from unittest.mock import patch
         
-        # 1. Create a customer, gets some customer_id N (e.g. 4000)
+        # 1. Create a customer
         customer1 = self.create_customer(customer_type='permanent')
         
-        # 2. Create another customer, gets customer_id N+1
+        # 2. Create another customer
         customer2 = self.create_customer(customer_type='permanent')
 
         # 3. Initialize a third customer without saving it yet
@@ -2127,19 +2123,18 @@ class LedgerCalculationTests(TestCase):
             customer_type='permanent'
         )
 
-        real_filter = Customer.objects.filter
+        # FIX: objects ki jagah all_objects use karein kyunki model badal chuka ha
+        real_filter = Customer.all_objects.filter
         call_count = [0]
 
         def fake_filter(*args, **kwargs):
             call_count[0] += 1
             if call_count[0] == 1:
-                # Force the first save attempt to compute a stale customer_id
-                # that matches customer2's customer_id, triggering an IntegrityError
                 return real_filter(id=customer1.id)
-            # Second attempt: behave normally, will see customer2 and compute a new id
             return real_filter(*args, **kwargs)
 
-        with patch.object(Customer.objects, 'filter', side_effect=fake_filter):
+        # FIX: Patch Customer.all_objects instead of Customer.objects
+        with patch.object(Customer.all_objects, 'filter', side_effect=fake_filter):
             customer3.save()
 
         # The mocked filter should be called twice due to the retry loop
