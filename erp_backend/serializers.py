@@ -8,17 +8,54 @@ class UserSerializer(serializers.ModelSerializer):
         required=True,
         help_text="Role to assign to the user (maps to Django Group)."
     )
+    fullname = serializers.CharField(write_only=True, required=True)
+    phone = serializers.CharField(write_only=True, required=True)
+    cnic = serializers.CharField(write_only=True, required=True)
+    address = serializers.CharField(write_only=True, required=False, allow_null=True, allow_blank=True)
+    designation = serializers.CharField(write_only=True, required=True)
+    dateofjoining = serializers.DateField(write_only=True, required=True)
+    employmenttype = serializers.ChoiceField(
+        choices=['fulltime', 'parttime', 'contract'], write_only=True, required=True
+    )
+    basicsalary = serializers.DecimalField(
+        max_digits=10, decimal_places=2, write_only=True, required=False, allow_null=True
+    )
+    salarytype = serializers.ChoiceField(
+        choices=['monthly', 'daily', 'perjob'], write_only=True, required=False, allow_null=True, allow_blank=True
+    )
     
     class Meta:
         model = User
-        fields = ['id', 'username', 'email', 'password', 'role']
+        fields = [
+            'id', 'username', 'email', 'password', 'role',
+            'fullname', 'phone', 'cnic', 'address', 'designation',
+            'dateofjoining', 'employmenttype', 'basicsalary', 'salarytype'
+        ]
         extra_kwargs = {
             'password': {'write_only': True}
         }
 
     def create(self, validated_data):
         role_name = validated_data.pop('role')
+        
+        # Pop profile fields
+        profile_data = {
+            'fullname': validated_data.pop('fullname', ''),
+            'phone': validated_data.pop('phone', ''),
+            'cnic': validated_data.pop('cnic', ''),
+            'address': validated_data.pop('address', None),
+            'designation': validated_data.pop('designation', ''),
+            'dateofjoining': validated_data.pop('dateofjoining', None),
+            'employmenttype': validated_data.pop('employmenttype', 'fulltime'),
+            'basicsalary': validated_data.pop('basicsalary', None),
+            'salarytype': validated_data.pop('salarytype', None),
+        }
+
         user = User.objects.create_user(**validated_data)
+        
+        from .models import UserProfile
+        UserProfile.objects.create(user=user, **profile_data)
+
         try:
             group = Group.objects.get(name=role_name)
             user.groups.add(group)
@@ -88,6 +125,15 @@ class PasswordChangeSerializer(serializers.Serializer):
 
 class UserMeSerializer(serializers.ModelSerializer):
     role = serializers.SerializerMethodField(help_text="Role constant of the user.")
+    fullname = serializers.CharField(source='profile.fullname', read_only=True)
+    phone = serializers.CharField(source='profile.phone', read_only=True)
+    cnic = serializers.CharField(source='profile.cnic', read_only=True)
+    address = serializers.CharField(source='profile.address', read_only=True)
+    designation = serializers.CharField(source='profile.designation', read_only=True)
+    dateofjoining = serializers.DateField(source='profile.dateofjoining', read_only=True)
+    employmenttype = serializers.CharField(source='profile.employmenttype', read_only=True)
+    basicsalary = serializers.DecimalField(source='profile.basicsalary', max_digits=10, decimal_places=2, read_only=True)
+    salarytype = serializers.CharField(source='profile.salarytype', read_only=True)
 
     class Meta:
         model = User
@@ -101,7 +147,9 @@ class UserMeSerializer(serializers.ModelSerializer):
             'is_staff', 
             'is_superuser', 
             'date_joined',
-            'role'
+            'role',
+            'fullname', 'phone', 'cnic', 'address', 'designation',
+            'dateofjoining', 'employmenttype', 'basicsalary', 'salarytype'
         ]
 
     def get_role(self, obj):
