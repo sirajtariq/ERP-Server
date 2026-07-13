@@ -17,8 +17,42 @@ class VendorSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Vendor
-        fields = ["id", "name", "phone", "address"]
-        read_only_fields = ["id"]
+        fields = [
+            "id",
+            "vendor_id",
+            "vendor_name",
+            "phone",
+            "email",
+            "address",
+            "tax_number",
+            "opening_credit",
+            "opening_note",
+            "credit_balance",
+            "advance_balance",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = [
+            "id",
+            "vendor_id",
+            "credit_balance",
+            "advance_balance",
+            "created_at",
+            "updated_at",
+        ]
+
+    def validate_phone(self, value):
+        """
+        Strip whitespace; convert empty/whitespace-only strings to None
+        so the DB stores NULL instead of '' — NULLs are exempt from
+        unique constraints, preventing IntegrityError collisions when
+        multiple vendors have no phone number.
+        """
+        if value is not None:
+            value = value.strip()
+            if value == '':
+                return None
+        return value
 
 
 class PurchaseItemSerializer(serializers.ModelSerializer):
@@ -48,7 +82,7 @@ class PurchaseInvoiceSerializer(serializers.ModelSerializer):
     """
 
     items = PurchaseItemNestedSerializer(many=True)
-    vendor_name = serializers.CharField(source="vendor.name", read_only=True)
+    vendor_name = serializers.CharField(source="vendor.vendor_name", read_only=True)
 
     class Meta:
         model = PurchaseInvoice
