@@ -12,15 +12,15 @@ class PurchaseItemInline(admin.TabularInline):
 
 @admin.register(Vendor)
 class VendorAdmin(admin.ModelAdmin):
-    list_display = ("name", "phone")
-    search_fields = ("name", "phone")
+    list_display = ("vendor_name", "vendor_id", "phone", "payable_balance", "advance_balance")
+    search_fields = ("vendor_name", "phone")
 
 
 @admin.register(PurchaseInvoice)
 class PurchaseInvoiceAdmin(admin.ModelAdmin):
-    list_display = ("invoice_number", "vendor", "date", "total_amount")
-    list_filter = ("date", "vendor")
-    search_fields = ("invoice_number", "vendor__name")
+    list_display = ("invoice_number", "vendor", "date", "status", "net_total")
+    list_filter = ("date", "vendor", "status")
+    search_fields = ("invoice_number", "vendor__vendor_name")
     inlines = [PurchaseItemInline]
 
 
