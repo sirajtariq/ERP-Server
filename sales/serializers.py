@@ -129,12 +129,13 @@ def compute_payment_status(invoice):
     tolerance = Decimal('0.01')
     pending = invoice.balance_due
     paid = invoice.paid_amount
+    covered = paid + invoice.advance_applied
 
     if pending > tolerance and paid == 0:
         return "Unpaid"
     if pending > tolerance and paid > 0:
         return "Partial"
-    if invoice.customer and invoice.customer.advance_balance > 0:
+    if covered > invoice.net_total + tolerance:
         return "Advance"
     return "Paid"
 

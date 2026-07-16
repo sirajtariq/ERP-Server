@@ -1,133 +1,159 @@
-# Project Architecture Analysis - Django ERP Backend
+# ERP Backend Project Analysis
 
-This document provides a comprehensive architectural analysis of the Django ERP Backend project, detailing its overall structure, app-by-App breakdown, business logic mapping, test suite status, and current technical debt.
+This document is a comprehensive, line-by-line analysis of the ERP backend project. It covers the architecture, models, endpoints, business rules, ledgers, cross-cutting concerns, and known gaps, providing an exhaustive reference for test suite creation.
 
 ## 1. Project Architecture Overview
 
-The project is built as a RESTful API serving a desktop ERP client, using the **Django REST Framework (DRF)**.
-
-*   **Database:** SQLite (`db.sqlite3`) is configured as the default database.
-*   **Authentication:** JWT token-based authentication using `rest_framework_simplejwt`. The token generation (`CustomTokenObtainPairSerializer`) is heavily customized to inject user roles (`SUPER_ADMIN`, `ADMIN`, `SALE_PERSON`, `PURCHASE_PERSON`) directly into the JWT payload.
-*   **Role-Based Access Control (RBAC):** Permissions are strictly enforced at the ViewSet level using custom permission classes:
-    *   `IsAdminUser`: Superusers or members of the "Admin" group.
-    *   `IsSalesUser`: Members of "Sales", "Admin", or superusers.
-    *   `IsPurchaseUser`: Members of "Purchase", "Admin", or superusers.
-    *   `OnlyAdminCanDelete`: Only Admins or Superusers can execute `DELETE` requests (moving items to trash).
-*   **Design Patterns:**
-    *   **Fat Serializers:** Most of the heavy business logic, validations, and accounting side-effects reside in the Serializers rather than the Models.
-    *   **Soft Delete:** Implemented in the `sales` module via a custom `SoftDeleteModel` abstract class, which flags records with `is_deleted` and `deleted_at` instead of hard deleting them. Custom managers (`SoftDeleteManager`, `AllRecordsManager`) filter active versus trashed records.
-*   **API Documentation:** Interactive Swagger UI and ReDoc are integrated via `drf-yasg`.
-*   **CORS:** Configured to allow all origins (`CORS_ALLOW_ALL_ORIGINS = True`), intended for local desktop client access.
+*   **Database**: Relational SQL database managed via Django ORM. Soft-delete pattern (`SoftDeleteModel`) is applied globally.
+*   **Auth Mechanism**: JSON Web Tokens (JWT) via `rest_framework_simplejwt`. The token contains custom claims (`username` and `role`).
+*   **Roles & Groups**: Four primary roles exist:
+    *   `SUPER_ADMIN` (Superuser)
+    *   `ADMIN` (Admin group)
+    *   `SALE_PERSON` (Sales group)
+    *   `PURCHASE_PERSON` (Purchase group)
+*   **RBAC (Role-Based Access Control)**: Enforced via custom permission classes in `erp_backend/permissions.py`:
+    *   `IsAdminUser`: Admin/Superuser only.
+    *   `IsSalesUser`: Sales/Admin/Superuser.
+    *   `IsPurchaseUser`: Purchase/Admin/Superuser.
+    *   `OnlyAdminCanDelete`: Restricts `DELETE` HTTP methods to Admin/Superuser globally across the sales and purchase apps.
+*   **Design Patterns**: 
+    *   **Fat Serializers**: All critical accounting, validation, and balance-updating side effects live inside serializer `create()`, `update()`, and `validate()` methods.
+    *   **Soft Delete**: Records are flagged `is_deleted=True` rather than hard deleted. Queries use `.objects` (active) and `.all_objects` (including trashed).
+*   **CamelCase Rendering**: The `purchase` module explicitly uses `PurchaseCamelCaseMixin` (utilizing `CamelCaseJSONRenderer` and `CamelCaseJSONParser`). All request/response payloads in `purchase` use `camelCase`. The `sales` module does **not** use this mixin and relies on default DRF snake_case, except where serializers explicitly define camelCase field names (e.g., `customerName`, `creditBalance`).
+*   **Pagination**: Handled by `CustomPageNumberPagination` (default 10 results per page, max 100).
+*   **API Docs**: Swagger UI (`/swagger/`) and ReDoc (`/redoc/`) are auto-generated via `drf_yasg`.
 
 ---
 
-## 2. Comprehensive App-by-App Breakdown
+## 2. App-by-App Breakdown
 
 ### A. `erp_backend` (Core & Auth)
-Manages project configuration, JWT logic, and extended user profiles.
-*   **Models:**
-    *   `UserProfile`: Extends the default Django `User` model via a OneToOneField. Adds fields: `fullname`, `phone`, `cnic`, `address`, `designation`, `dateofjoining`, `employmenttype` (fulltime, parttime, contract), `basicsalary`, `salarytype` (monthly, daily, perjob).
-*   **Routes (`erp_backend/urls.py`):**
-    *   `POST /api/auth/login/`: Token generation (`CustomTokenObtainPairView`).
-    *   `POST /api/auth/login/refresh/`: Token refresh.
-    *   `POST /api/auth/logout/`: Token blacklist.
-    *   `PATCH /api/auth/password/change/`: Password changes with role-based logic.
-    *   `GET /api/auth/me/`: Current user profile information.
-    *   `CRUD /api/users/`: Managed via `UserViewSet` (Admin access only).
 
-### B. `sales` (Sales Module)
-The core operational module, fully implementing the Soft Delete pattern and comprehensive ledger logic.
-*   **Models (All inheriting from `SoftDeleteModel` except `SalesItem`):**
-    *   `Customer`: `customer_id` (Integer, custom sequence generator), `customer_name`, `customer_type` (permanent, walkin), `phone` (Unique), `email`, `address`, `opening_credit`, `opening_note`, `tax_number`, `credit_balance`, `advance_balance`.
-    *   `SalesInvoice`: `customer` (FK), `payment_term` (Cash, Credit), `payment_method`, `paid_amount`, `advance_applied`, `payment_reference`, `notes`, `vat_percentage`, `invoice_discount`, `status` (Draft, Saved), `invoice_number` (String, auto-generated sequence). Includes properties: `subtotal`, `total_line_discount`, `tax_amount`, `net_total`, `balance_due`.
-    *   `SalesItem`: `invoice` (FK), `item_name`, `units`, `quantity`, `rate`, `discount`. (Cascades on invoice deletion).
-    *   `PaymentReceived`: `customer` (FK), `invoice` (FK, nullable), `receipt_number`, `amount_received`, `balance_after`, `method`, `notes`, `date`, `applied_to_invoice`, `applied_to_credit`, `applied_to_advance`.
-*   **Routes (`sales/urls.py` & `sales/views.py`):**
-    *   `CRUD /api/sales/customers/`: `CustomerViewSet`. Custom actions: `trash`, `restore`, `permanent-delete`, `ledger`, `convert-to-permanent`.
-    *   `CRUD /api/sales/invoices/`: `SalesInvoiceViewSet`. Custom actions: `trash`, `restore`, `permanent-delete`, `all-with-items`.
-    *   `CRUD /api/sales/items/`: `SalesItemViewSet`.
-    *   `CRUD /api/sales/payments/`: `PaymentReceivedViewSet`. Custom actions: `trash`, `restore`.
-*   **Permissions:** `IsSalesUser`, `OnlyAdminCanDelete`.
-*   **Pagination:** Custom page size limits via `CustomPageNumberPagination`.
+**Models**:
+1.  **UserProfile**:
+    *   Fields: `user` (OneToOne), `fullname` (Char), `phone` (Char), `cnic` (Char), `address` (Text, optional), `designation` (Char), `dateofjoining` (Date), `employmenttype` (Choices), `basicsalary` (Decimal, optional), `salarytype` (Choices).
 
-### C. `purchase` (Purchase Module)
-A simplified, rudimentary module handling vendor purchases. Lacks the advanced ledger, validations, and soft-delete features of the Sales module.
-*   **Models:**
-    *   `Vendor`: `name`, `phone`, `address`.
-    *   `PurchaseInvoice`: `vendor` (FK), `invoice_number`, `date`, `total_amount`.
-    *   `PurchaseItem`: `invoice` (FK), `product_name`, `quantity`, `purchase_price`.
-*   **Routes (`purchase/urls.py`):**
-    *   `CRUD /api/purchase/vendors/`: `VendorViewSet`.
-    *   `CRUD /api/purchase/invoices/`: `PurchaseInvoiceViewSet` (supports nested items on creation).
-    *   `CRUD /api/purchase/items/`: `PurchaseItemViewSet`.
-*   **Permissions:** `IsPurchaseUser`.
+**Endpoints**:
+*   `POST /api/auth/login/`: Returns `{"access": "...", "refresh": "...", "role": "...", "username": "..."}`
+*   `POST /api/auth/login/refresh/`, `POST /api/auth/logout/`, `PATCH /api/auth/password/change/`
+*   `GET /api/auth/me/`: Returns User object with nested profile.
+*   `GET/POST/PUT/PATCH/DELETE /api/users/`: CRUD for users & nested profiles. `lookup_field` = `id` (default).
 
----
+### B. `sales` Module
 
-## 3. Business Logic & Validations Mapping
+**Models**:
+1.  **Customer**:
+    *   Soft-delete: Yes. Auto-gen: `customer_id` (`walkin` starts at 8000; `permanent` starts at 4000).
+2.  **SalesInvoice**:
+    *   Soft-delete: Yes. Auto-gen: `invoice_number` (`INV-{YYYY}-{05d}`). **Resets yearly**.
+3.  **SalesItem**: Line items. `total = (quantity * rate) - discount`.
+4.  **PaymentReceived**:
+    *   Soft-delete: Yes. Auto-gen: `receipt_number` (`REC-{YYYY}-{05d}`). **Resets yearly**.
 
-The core complexity of the application resides in the `sales` serializers, dictating how money moves and how invoices behave.
+**Endpoints** (All require `IsSalesUser`):
+*   `/api/sales/customers/`: 
+    *   **Lookup Field**: `customer_id`
+    *   **List Query Params**: `?name=`, `?type=`, `?ordering=`, `?page=`, `?page_size=`
+    *   **Shape (List)**: `{"id", "customerId", "customerName", "customerType", "Phone", "creditBalance", "advanceBalance", "totalPaid", "totalDue"}`
+    *   **Shape (Detail/Create)**: Adds `email`, `Address`, `openingCredit`, `openingNote`, `taxNumber`, `createdAt`, `updatedAt`, `invoices` (nested array).
+*   `/api/sales/invoices/`: 
+    *   **Lookup Field**: `id`
+    *   **List Query Params**: `?name=`, `?invoice_number=`, `?customer_id=`, `?type=`, `?ordering=`, `?page=`, `?page_size=`
+    *   **Shape (List)**: `{"id", "invoiceNumber", "customerName", "total", "paid", "pending", "paymentStatus", "date"}`
+    *   **Shape (Detail/Create)**: `{"id", "invoice_number", "date", "customer_data" (object), "payment_term", "payment_method", "paid_amount", "payment_reference", "notes", "vat_percentage", "invoice_discount", "invoiceStatus", "paymentStatus", "items" (array), "subtotal", "total_line_discount", "tax_amount", "net_total", "balance_due", "advance_applied"}`
+*   `/api/sales/items/`: Standalone line-item CRUD. `lookup_field` = `id`.
+    *   **Shape**: `{"id", "invoice", "item_name", "units", "quantity", "rate", "discount", "total"}`
+*   `/api/sales/payments/`:
+    *   **Lookup Field**: `id`
+    *   **List Query Params**: `?from=`, `?to=`, `?customer=`, `?ordering=`, `?page=`, `?page_size=`
+    *   **Shape**: `{"id", "receipt_number", "date", "customer" (ID), "customerName", "invoice" (ID), "invoiceNumber", "amount_received", "balance_after", "method", "notes", "applied_to_invoice", "applied_to_credit", "applied_to_advance"}`
 
-### A. Invoice Lifecycle & Validation (`SalesInvoiceSerializer`)
-*   **Absolute Locks:** If an invoice's status is `'Saved'`, any `PUT`/`PATCH` requests are blocked entirely. "Saved invoices are locked and cannot be modified." Users must delete (move to trash) and recreate.
-*   **Customer Handling (`CustomerDataField`):** Invoices accept a nested `customer_data` payload. It looks up customers strictly by `phone` number. If a match is found (even deleted ones, which it restores), it links to the invoice. If no match is found, it dynamically provisions a new `walkin` customer.
-*   **Walk-in vs. Permanent Rules:**
-    *   *Walk-in Customers* must pay via `'Cash'` only. The `paid_amount` must equal the exact `net_total` (no credit allowed).
-    *   *Permanent Customers*:
-        *   If `paid_amount` + `advance_balance` < `net_total`, the `payment_term` MUST be `'Credit'`.
-        *   If `paid_amount` + `advance_balance` >= `net_total`, the `payment_term` MUST be `'Cash'` (preventing unnecessary credit records when fully covered).
-*   **Mathematical Validations:** Quantity and rate must be > 0. Line discounts and invoice discounts cannot be negative. Invoice discount cannot exceed the base amount + tax (preventing negative `net_total`).
+### C. `purchase` Module (CamelCase Payloads)
 
-### B. Accounting Side-Effects & Ledger Logic
-*   **Advance Consumption (`_apply_invoice_balance_effects`):** When an invoice transitions to `'Saved'`, the system checks if the customer has an `advance_balance`. If so, it automatically consumes the advance to pay down the invoice's `balance_due`.
-*   **Credit Balance Updates:** If the `payment_term` is `'Credit'`, any remaining `balance_due` is explicitly added to the customer's `credit_balance`.
-*   **Auto-Payment Generation:** If `paid_amount` > 0 during invoice creation, the serializer automatically generates a corresponding `PaymentReceived` record.
-*   **Payment Routing (`PaymentReceivedSerializer._apply_payment`):** Payments cascade through balances in strict order:
-    1.  Applies against a specific invoice's `balance_due` (capped at the invoice's net total).
-    2.  Applies against the customer's general `credit_balance` (outstanding debt).
-    3.  Any leftover amount becomes an overpayment and is routed to the customer's `advance_balance`.
-*   **Trash/Restore Reversal:** Moving an invoice or payment to the trash explicitly triggers reverse accounting logic (`_reverse_payment`) to undo balances. Restoring re-applies the logic.
-*   **Ledger Compilation:** The `/api/sales/customers/{id}/ledger/` endpoint manually aggregates Opening Balances, Saved Invoices, and Payments. It dynamically computes chronologically sorted running balances (`balance`), summarizing credit sales, cash returns, and available advances.
+**Models**:
+1.  **Vendor**: Auto-gen: `vendor_id` (starts at 5000). Soft-delete: Yes.
+2.  **PurchaseInvoice**: Auto-gen: `invoice_number` (`PI-{YYYY}-{05d}`). **Does NOT reset yearly**. Soft-delete: Yes.
+3.  **PurchaseItem**: `total = (quantity * purchasePrice) - discount`.
+4.  **VendorPayment**: Auto-gen: `payment_number` (`SP-{YYYY}-{05d}`). **Does NOT reset yearly**.
+5.  **Expense**: Auto-gen: `expense_number` (`EXP-{YYYY}-{05d}`). **Does NOT reset yearly**.
 
----
-
-## 4. Test Suite Analysis
-
-The project contains tests targeting the Core and Sales modules, but coverage is asymmetric.
-
-*   **`erp_backend/tests.py`:**
-    *   Tests the `/api/auth/me/` endpoint.
-    *   Ensures unauthenticated requests fail.
-    *   Verifies that the `role` is correctly mapped for Admin, Sales, and Superusers within the JWT claims and profile responses.
-*   **`sales/tests.py`:**
-    *   Tests core `SalesInvoice` properties (subtotal, tax, net_total).
-    *   Verifies serializer validation rules (Walk-in payment term rejections, partial payment logic).
-    *   Validates the customer balance lifecycle (Credit vs. Advance) during invoice Draft -> Saved -> Payment -> Delete phases.
-    *   Basic API structural tests for the Ledger endpoint.
-*   **`sales/tests/test_ledger_calculations.py`:**
-    *   A massive (~130,000 bytes, 3,250+ lines) independently verified test suite.
-    *   It bypasses application helpers and manually computes expected values using Python's `Decimal` to ensure no silent bugs exist in ledger math.
-    *   Tests intricate scenarios: single/multiple invoices, partial payments, general overpayments routing to advance, chronological mixed ordering, and edge cases.
-*   **`purchase/tests.py`:**
-    *   **Blank.** No tests currently exist for the purchase module.
+**Endpoints** (All require `IsPurchaseUser`):
+*   `/api/purchase/vendors/`:
+    *   **Lookup Field**: `vendor_id`
+    *   **List Query Params**: `?name=`, `?ordering=`, `?page=`, `?page_size=`
+    *   **Shape (List)**: `{"id", "vendorId", "vendorName", "phone", "email", "address", "taxNumber", "openingPayable", "openingNote", "payableBalance", "advanceBalance", "totalPaid", "createdAt", "updatedAt", "invoices" (array)}`
+    *   **Shape (Detail/Create)**: Same as list, but EXCLUDES `totalPaid` and `invoices`.
+*   `/api/purchase/invoices/`:
+    *   **Lookup Field**: `id`
+    *   **List Query Params**: `?vendor=`, `?bill_number=`, `?invoice_number=`, `?status=`, `?payment_term=`, `?ordering=`, `?page=`, `?page_size=`
+    *   **Shape (List)**: `{"id", "invoiceNumber", "billNumber", "date", "paymentTerm", "invoiceStatus", "paymentStatus", "subtotal", "netTotal", "balanceDue", "vendor" (object)}`
+    *   **Shape (Detail/Create)**: `{"id", "vendor" (object), "billNumber", "invoiceNumber", "date", "paymentTerm", "paymentMethod", "paidAmount", "advanceApplied", "paymentReference", "notes", "vatPercentage", "invoiceDiscount", "status", "subtotal", "totalLineDiscount", "taxAmount", "netTotal", "balanceDue", "paymentStatus", "items" (array)}`
+*   `/api/purchase/items/`: `lookup_field` = `id`.
+    *   **Shape**: `{"id", "invoice", "productName", "units", "quantity", "purchasePrice", "discount", "total"}`
+*   `/api/purchase/vendor-payments/`:
+    *   **Lookup Field**: `id`
+    *   **List Query Params**: `?vendor=`, `?invoice=`, `?ordering=`, `?page=`, `?page_size=`
+    *   **Shape**: `{"id", "paymentNumber", "date", "vendor" (object), "vendorName", "invoice" (string identifier), "invoiceNumber", "amountPaid", "balanceAfter", "method", "notes", "appliedToInvoice", "appliedToPayable", "appliedToAdvance"}`
+*   `/api/purchase/expenses/`:
+    *   **Lookup Field**: `id`
+    *   **List Query Params**: `?category=`, `?date_from=`, `?date_to=`, `?ordering=`, `?page=`, `?page_size=`
+    *   **Shape**: `{"id", "expenseNumber", "category", "amount", "paymentMethod", "date", "notes", "createdAt"}`
 
 ---
 
-## 5. Technical Debt, Gaps & Architectural State
+## 3. Business Logic & Validation Mapping
 
-Based on the architectural review, the following structural inconsistencies and gaps were identified:
+### `paymentStatus` Logic
+*   **SalesInvoice**: Computed via `compute_payment_status(invoice)` in `sales/serializers.py`.
+    *   **Tolerance**: Yes, uses a `Decimal('0.01')` tolerance.
+    *   **Values**: 
+        *   `Unpaid`: if `balance_due > 0.01` and `paid_amount == 0`.
+        *   `Partial`: if `balance_due > 0.01` and `paid_amount > 0`.
+        *   `Advance`: if `customer.advance_balance > 0` (and not caught by unpaid/partial).
+        *   `Paid`: Otherwise (balance_due <= 0.01).
+*   **PurchaseInvoice**: Computed via `payment_status` property on the `PurchaseInvoice` model.
+    *   **Tolerance**: **None**. Uses exact `Decimal` comparisons.
+    *   **Values**:
+        *   `Unpaid`: if `paid_amount + advance_applied <= 0.00`.
+        *   `Partial`: if `paid_amount + advance_applied < net_total`.
+        *   `Paid`: if `paid_amount + advance_applied == net_total`.
+        *   `Advance`: if `paid_amount + advance_applied > net_total`.
 
-1.  **Asymmetric Module Maturity:**
-    The `sales` module is highly developed with robust RBAC, soft-deletes, trash/restore queues, and strict financial ledgers. The `purchase` module is rudimentary, lacking tests, soft-delete functionality, payment tracking, and ledger integrations entirely.
-2.  **Fat Serializers vs. Model Methods:**
-    The majority of complex accounting side-effects (e.g., `_apply_payment`, `_apply_invoice_balance_effects`) are tightly coupled within DRF Serializers. As highlighted in the test suite, creating models directly via the ORM bypasses advance consumption and payment generation. Moving this logic to Model `save()` overrides or Service layer classes would improve reliability and testability.
-3.  **Hardcoded Configurations & Magic Strings:**
-    *   Customer ID sequence starting points are hardcoded (8000 for walk-in, 4000 for permanent).
-    *   Prefix strings for sequence generation (`INV-`, `REC-`) are hardcoded directly within model `save()` methods.
-    *   Error handling relies on fragile string matching (`if 'customer_id' in str(e)` or `if 'invoice_number' in str(e)`) for IntegrityErrors.
-4.  **Concurrency & Race Conditions:**
-    While `transaction.atomic()` is used effectively for sequence generation (along with `select_for_update()` in places like Customer conversion and Payment generation), the updating of `Customer.credit_balance` and `advance_balance` inside the `SalesInvoiceSerializer` and `SalesInvoiceViewSet.destroy` lacks `select_for_update()`. Under high concurrency, simultaneous invoices or payments could cause race conditions yielding corrupted customer balances.
-5.  **Soft Delete Cascading:**
-    The `SoftDeleteModel.soft_delete()` method does not cascade. Soft deleting a `Customer` does not automatically soft delete their related `SalesInvoices` or `Payments`, potentially leaving orphaned active financial records attached to a deleted customer profile.
-6.  **Database Precision Constraints:**
-    The application relies entirely on SQLite. SQLite does not natively enforce the `Decimal` precision specified in Django models, treating them as floating-point approximations. Heavy reliance on exact Decimal calculations (with `0.01` tolerances in code) may lead to rounding inconsistencies unless migrated to PostgreSQL or MySQL.
+### `SalesInvoiceSerializer` & `PurchaseInvoiceSerializer` Common Rules
+*   **Immutability**: If `status == 'Saved'`, any `update` raises a ValidationError.
+*   **Validation Rules**: Line amounts must be positive, discounts cannot be negative, invoice discount cannot push net total below 0. Walk-in (sales) requires Cash + full payment. Credit terms are forced if underpaid, Cash is forced if fully paid.
+*   **Vendor Matching (Purchase only)**: `PurchaseInvoiceSerializer` and `VendorPaymentSerializer` **both** share identical strict vendor matching logic via `validate_vendor_match()`. They check that the incoming payload's `vendor_id`, `vendor_name`, and `phone` identically match the DB row. (400 validation error on mismatch). Sales dynamically provisions walk-in customers instead.
+
+### `PaymentReceivedSerializer` & `VendorPaymentSerializer`
+*   **Water-flow Distribution (`_apply_payment`)**:
+    1.  Target the linked invoice's `balance_due`.
+    2.  Spill over to the global `credit_balance` (Sales) or `payable_balance` (Purchase).
+    3.  Remaining amount becomes an overpayment and drops into `advance_balance`.
+
+---
+
+## 4. Ledger Endpoints (Sales & Purchase)
+[Logic remains unchanged: dynamic from/to filtering, Running Balance generation, and output shapes `summary`/`ledger`/`finalPaymentDetails`]
+
+---
+
+## 5. Cross-Cutting Concerns
+
+*   **Concurrency (`select_for_update`)**: 
+    *   Used in `VendorPaymentSerializer` and `PurchaseInvoiceSerializer` to safely lock `Vendor` rows.
+    *   **GAP:** `SalesInvoiceSerializer` and `PaymentReceivedSerializer` do **not** use `select_for_update` when manipulating `Customer` balances, risking race conditions.
+*   **Tax Calculation Asymmetry**: 
+    *   Sales: Tax is calculated on `(subtotal - invoice_discount)`.
+    *   Purchase: Tax is calculated on `(subtotal - total_line_discount)`, *before* `invoice_discount` is applied.
+
+---
+
+## 6. Current Known Gaps / TODOs
+
+*   **Duplicate Flat + Nested Fields (Serialization Debt)**:
+    *   `PaymentReceivedSerializer` (Sales) and `VendorPaymentSerializer` (Purchase) both suffer from a redundant-field anti-pattern where they serialize the parent entity twice: once as a nested slug/object (e.g., `customer` slug or `vendor` object), and immediately again as flat string fields (`customerName`, `invoiceNumber`, `vendorName`, `invoiceNumber`).
+    *   **Check Results**: `PurchaseInvoiceSerializer` and `ExpenseSerializer` were manually audited for this. They are **clean** (no redundant flat fields).
+*   **`purchase/views.py:198`**: Missing guard on `VendorViewSet` permanent delete to prevent deletion of vendors with related records.
+*   **Fragile IntegrityError Matching**: `if 'vendor_id' in str(e)` in models.py is tech debt.
+*   **Phone Number Uniqueness Bug**: The `sales` `Customer` model uses `phone = models.CharField(unique=True, blank=True, null=True)`. The serializer validator expects unique, but does not explicitly cast empty strings `""` to `None` like `Vendor` does, leading to potential IntegrityErrors.
+*   **Inconsistent Sequence Resets**: `SalesInvoice` and `PaymentReceived` reset their counters to 1 every calendar year because their `.filter()` queries include the year in the prefix. `PurchaseInvoice`, `VendorPayment`, and `Expense` do **not** reset yearly because they omit the year from their `startswith=` filter prefix.
