@@ -567,6 +567,53 @@ class PurchaseInvoiceTests(PurchaseInvoiceAPITestMixin, TestCase):
         resp = self._create_invoice()
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
 
+    def test_list_endpoint_shape(self):
+        """Test the list endpoint returns exactly the requested shape."""
+        self._auth_as(self.purchase_user)
+        # Create a couple of invoices with different payment statuses
+        i1 = self._create_invoice(paid_amount="0.00", payment_term="Credit", status="Saved")
+        i2 = self._create_invoice(paid_amount="200.00", payment_term="Cash", status="Saved", bill_number="B-123")
+        
+        self.assertEqual(i1.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(i2.status_code, status.HTTP_201_CREATED)
+
+        resp = self.client.get("/api/purchase/invoices/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        
+        results = resp.json().get("results", [])
+        self.assertGreaterEqual(len(results), 2)
+        
+        for item in results:
+            # Check for correct keys
+            self.assertIn("id", item)
+            self.assertIn("invoiceNumber", item)
+            self.assertIn("billNumber", item)
+            self.assertIn("date", item)
+            self.assertIn("paymentTerm", item)
+            self.assertIn("invoiceStatus", item)
+            self.assertIn("paymentStatus", item)
+            self.assertIn("subtotal", item)
+            self.assertIn("netTotal", item)
+            self.assertIn("balanceDue", item)
+            
+            # Check vendor object
+            self.assertIn("vendor", item)
+            vendor = item["vendor"]
+            self.assertIn("vendorId", vendor)
+            self.assertIn("vendorName", vendor)
+            self.assertIn("phone", vendor)
+            
+            # Check absence of wrong keys
+            self.assertNotIn("total", item)
+            self.assertNotIn("paid", item)
+            self.assertNotIn("pending", item)
+            self.assertNotIn("status", item) # We renamed it to invoiceStatus
+            
+        # Verify payment statuses in list
+        payment_statuses = [item["paymentStatus"] for item in results]
+        self.assertIn("Unpaid", payment_statuses)
+        self.assertIn("Paid", payment_statuses)
+
 
 class VendorPaymentTests(PurchaseInvoiceAPITestMixin, TestCase):
     """Tests for VendorPayment and Expense endpoints and business logic."""
@@ -803,3 +850,192 @@ class VendorPaymentTests(PurchaseInvoiceAPITestMixin, TestCase):
         resp2 = self.client.get("/api/purchase/expenses/")
         self.assertEqual(resp1.status_code, status.HTTP_403_FORBIDDEN)
         self.assertEqual(resp2.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class VendorLedgerTests(PurchaseInvoiceAPITestMixin, TestCase):
+    """Tests for Vendor ledger endpoint."""
+    
+    def test_ledger_no_invoices_returns_opening(self):
+        self.vendor.opening_payable = Decimal("100.00")
+        self.vendor.save()
+        self._auth_as(self.purchase_user)
+        
+        resp = self.client.get(f"/api/purchase/vendors/{self.vendor_id}/ledger/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        
+        data = resp.json()
+        self.assertEqual(data["vendor"]["vendorId"], self.vendor_id)
+        
+        # Summary
+        self.assertEqual(data["summary"]["openingPayable"], 100.0)
+        self.assertEqual(data["summary"]["creditPurchases"], 0.0)
+        
+        # Ledger entries
+        self.assertEqual(len(data["ledger"]), 1)
+        self.assertEqual(data["ledger"][0]["voucher"], "OPENING")
+        self.assertEqual(data["ledger"][0]["credit"], 100.0)
+        self.assertEqual(data["ledger"][0]["debit"], 0.0)
+        self.assertEqual(data["ledger"][0]["balance"], 100.0)
+
+    def test_ledger_with_invoices_and_payments_order_and_balance(self):
+        self._auth_as(self.purchase_user)
+        
+        self.vendor.opening_payable = Decimal("50.00")
+        self.vendor.save()
+        
+        # Day 1: Invoice 1: 100 Credit
+        # Balance becomes 150
+        data1 = dict(self.valid_invoice_data)
+        data1["date"] = "2026-07-01"
+        data1["paymentTerm"] = "Credit"
+        data1["paidAmount"] = "0.00"
+        data1["status"] = "Saved"
+        data1["items"] = [{"productName": "A", "quantity": "1.00", "purchasePrice": "100.00", "discount": "0.00"}]
+        resp1 = self.client.post("/api/purchase/invoices/", data1, format="json")
+        self.assertEqual(resp1.status_code, status.HTTP_201_CREATED)
+        
+        # Day 2: Payment of 70
+        # Balance becomes 80
+        resp2 = self.client.post("/api/purchase/vendor-payments/", {
+            "vendor": {"vendorId": self.vendor_id, "vendorName": "Test Vendor", "phone": "03001111111"},
+            "amountPaid": "70.00",
+            "date": "2026-07-02",
+            "method": "Cash"
+        }, format="json")
+        self.assertEqual(resp2.status_code, status.HTTP_201_CREATED)
+        
+        # Day 3: Invoice 2: 200 Cash with 200 paid
+        # Balance becomes 80 (since cash invoice paid immediately, or increases to 280 then drops to 80)
+        data3 = dict(self.valid_invoice_data)
+        data3["date"] = "2026-07-03"
+        data3["paymentTerm"] = "Cash"
+        data3["paidAmount"] = "200.00"
+        data3["status"] = "Saved"
+        data3["items"] = [{"productName": "B", "quantity": "1.00", "purchasePrice": "200.00", "discount": "0.00"}]
+        resp3 = self.client.post("/api/purchase/invoices/", data3, format="json")
+        self.assertEqual(resp3.status_code, status.HTTP_201_CREATED)
+        
+        resp = self.client.get(f"/api/purchase/vendors/{self.vendor_id}/ledger/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        
+        ledger = resp.json()["ledger"]
+        # Expected:
+        # 1. Opening: Credit 50 -> Balance 50
+        # 2. Inv1: Credit 100 -> Balance 150
+        # 3. Pay1: Debit 70 -> Balance 80
+        # 4. Inv2: Credit 200 -> Balance 280
+        # 5. Pay2 (auto from Inv2): Debit 200 -> Balance 80
+        
+        self.assertEqual(len(ledger), 5)
+        
+        self.assertEqual(ledger[0]["voucher"], "OPENING")
+        self.assertEqual(ledger[0]["credit"], 50.0)
+        self.assertEqual(ledger[0]["balance"], 50.0)
+        
+        self.assertTrue(ledger[1]["voucher"].startswith("PI-"))
+        self.assertEqual(ledger[1]["credit"], 100.0)
+        self.assertEqual(ledger[1]["balance"], 150.0)
+        
+        self.assertTrue(ledger[2]["voucher"].startswith("SP-"))
+        self.assertEqual(ledger[2]["debit"], 70.0)
+        self.assertEqual(ledger[2]["balance"], 80.0)
+        
+        self.assertTrue(ledger[3]["voucher"].startswith("PI-"))
+        self.assertEqual(ledger[3]["credit"], 200.0)
+        self.assertEqual(ledger[3]["balance"], 280.0)
+        
+        self.assertTrue(ledger[4]["voucher"].startswith("SP-"))
+        self.assertEqual(ledger[4]["debit"], 200.0)
+        self.assertEqual(ledger[4]["balance"], 80.0)
+        
+        # Verify running balance matches final payable_balance
+        self.vendor.refresh_from_db()
+        self.assertEqual(self.vendor.payable_balance, Decimal("80.00"))
+        
+        summary = resp.json()["summary"]
+        self.assertEqual(summary["closingBalance"], 80.0)
+
+    def test_ledger_excludes_draft_and_trashed(self):
+        self._auth_as(self.purchase_user)
+        # Draft invoice
+        data1 = dict(self.valid_invoice_data)
+        data1["date"] = "2026-07-01"
+        data1["paymentTerm"] = "Credit"
+        data1["paidAmount"] = "0.00"
+        data1["status"] = "Draft"
+        data1["items"] = [{"productName": "A", "quantity": "1.00", "purchasePrice": "100.00", "discount": "0.00"}]
+        self.client.post("/api/purchase/invoices/", data1, format="json")
+        
+        # Saved invoice but trashed later
+        data2 = dict(self.valid_invoice_data)
+        data2["date"] = "2026-07-02"
+        data2["paymentTerm"] = "Credit"
+        data2["paidAmount"] = "0.00"
+        data2["status"] = "Saved"
+        data2["items"] = [{"productName": "B", "quantity": "1.00", "purchasePrice": "50.00", "discount": "0.00"}]
+        resp2 = self.client.post("/api/purchase/invoices/", data2, format="json")
+        
+        # Trash it
+        self.client.delete(f"/api/purchase/invoices/{resp2.json()['id']}/")
+        
+        resp = self.client.get(f"/api/purchase/vendors/{self.vendor_id}/ledger/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        
+        ledger = resp.json()["ledger"]
+        self.assertEqual(len(ledger), 0)
+
+    def test_ledger_date_range_balance_brought_forward(self):
+        self._auth_as(self.purchase_user)
+        self.vendor.opening_payable = Decimal("10.00")
+        self.vendor.save()
+        
+        # Prior to range (Date: 2026-06-01)
+        data1 = dict(self.valid_invoice_data)
+        data1["date"] = "2026-06-01"
+        data1["paymentTerm"] = "Credit"
+        data1["paidAmount"] = "0.00"
+        data1["status"] = "Saved"
+        data1["items"] = [{"productName": "A", "quantity": "1.00", "purchasePrice": "100.00", "discount": "0.00"}]
+        self.client.post("/api/purchase/invoices/", data1, format="json") # Balance = 110
+        
+        self.client.post("/api/purchase/vendor-payments/", {
+            "vendor": {"vendorId": self.vendor_id, "vendorName": "Test Vendor", "phone": "03001111111"},
+            "amountPaid": "20.00",
+            "date": "2026-06-15",
+            "method": "Cash"
+        }, format="json") # Balance = 90
+        
+        # Within range (Date: 2026-07-01)
+        data2 = dict(self.valid_invoice_data)
+        data2["date"] = "2026-07-01"
+        data2["paymentTerm"] = "Credit"
+        data2["paidAmount"] = "0.00"
+        data2["status"] = "Saved"
+        data2["items"] = [{"productName": "B", "quantity": "1.00", "purchasePrice": "50.00", "discount": "0.00"}]
+        self.client.post("/api/purchase/invoices/", data2, format="json")
+        
+        # Query with range
+        resp = self.client.get(f"/api/purchase/vendors/{self.vendor_id}/ledger/?from=2026-07-01&to=2026-07-31")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        
+        ledger = resp.json()["ledger"]
+        self.assertEqual(len(ledger), 2)
+        
+        self.assertEqual(ledger[0]["description"], "Balance Brought Forward")
+        self.assertEqual(ledger[0]["credit"], 90.0)
+        self.assertEqual(ledger[0]["balance"], 90.0)
+        
+        self.assertTrue(ledger[1]["voucher"].startswith("PI-"))
+        self.assertEqual(ledger[1]["credit"], 50.0)
+        self.assertEqual(ledger[1]["balance"], 140.0)
+
+    def test_ledger_invalid_vendor(self):
+        self._auth_as(self.purchase_user)
+        resp = self.client.get("/api/purchase/vendors/999999/ledger/")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_ledger_sales_user_denied(self):
+        self._auth_as(self.sales_user)
+        resp = self.client.get(f"/api/purchase/vendors/{self.vendor_id}/ledger/")
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+

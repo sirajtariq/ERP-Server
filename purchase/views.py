@@ -18,6 +18,7 @@ from rest_framework.exceptions import ValidationError as serializers_ValidationE
 from django.db import transaction
 from djangorestframework_camel_case.render import CamelCaseJSONRenderer
 from djangorestframework_camel_case.parser import CamelCaseJSONParser
+from decimal import Decimal
 
 class PurchaseCamelCaseMixin:
     renderer_classes = [CamelCaseJSONRenderer]
@@ -207,11 +208,173 @@ class VendorViewSet(PurchaseCamelCaseMixin, viewsets.ModelViewSet):
         vendor.delete()  # actual hard delete via Django's default
         return Response({"message": "Permanently deleted."})
 
-    # TODO: Implement vendor ledger action once PurchaseInvoice and
-    # VendorPayment models exist. Should mirror CustomerViewSet.ledger
-    # with purchase-side transactions.
+    @swagger_auto_schema(
+        operation_description="Return full vendor ledger with summary, transactions, and payment details.",
+        manual_parameters=[
+            openapi.Parameter(
+                "from", openapi.IN_QUERY,
+                description="Start date for filtering (YYYY-MM-DD)",
+                type=openapi.TYPE_STRING,
+            ),
+            openapi.Parameter(
+                "to", openapi.IN_QUERY,
+                description="End date for filtering (YYYY-MM-DD)",
+                type=openapi.TYPE_STRING,
+            ),
+        ]
+    )
+    @action(detail=True, methods=["get"], url_path="ledger")
+    def ledger(self, request, **kwargs):
+        vendor = self.get_object()
+        
+        from_date = request.query_params.get('from')
+        to_date = request.query_params.get('to')
+        
+        if from_date and to_date:
+            prior_invoices = vendor.invoices.filter(is_deleted=False, status='Saved', date__lt=from_date)
+            prior_payments = vendor.payments.filter(is_deleted=False, date__lt=from_date)
+            balance_before_range = Decimal(str(vendor.opening_payable or '0.00'))
+            for inv in prior_invoices:
+                balance_before_range += Decimal(str(inv.net_total))
+            for pay in prior_payments:
+                balance_before_range -= Decimal(str(pay.amount_paid))
+            for inv in prior_invoices:
+                balance_before_range -= Decimal(str(inv.advance_applied))
+            opening_payable_for_range = balance_before_range
+            opening_desc = "Balance Brought Forward"
+            
+            invoices = vendor.invoices.filter(is_deleted=False, status="Saved", date__range=[from_date, to_date]).order_by("date", "id")
+            payments = vendor.payments.filter(is_deleted=False, date__range=[from_date, to_date]).order_by("date", "id")
+        else:
+            opening_payable_for_range = Decimal(str(vendor.opening_payable or '0.00'))
+            opening_desc = "Opening Balance"
+            
+            invoices = vendor.invoices.filter(is_deleted=False, status="Saved").order_by("date", "id")
+            payments = vendor.payments.filter(is_deleted=False).order_by("date", "id")
 
+        opening_payable = Decimal(str(opening_payable_for_range))
 
+        all_invoices = list(invoices.select_related("vendor").prefetch_related("items"))
+        all_payments = list(payments.select_related("invoice"))
+
+        credit_purchases = sum((Decimal(str(inv.net_total)) for inv in all_invoices if inv.payment_term == "Credit"), Decimal('0.00'))
+        cash_purchases = sum((Decimal(str(inv.paid_amount)) for inv in all_invoices if inv.payment_term == "Cash"), Decimal('0.00'))
+        total_paid_out = sum((Decimal(str(pay.amount_paid)) for pay in all_payments), Decimal('0.00'))
+        total_purchases_amt = sum((Decimal(str(inv.net_total)) for inv in all_invoices), Decimal('0.00'))
+        total_invoices = len(all_invoices)
+        total_advance_applied = sum((Decimal(str(inv.advance_applied)) for inv in all_invoices), Decimal('0.00'))
+
+        ledger_rows = []
+
+        if opening_payable != Decimal('0.00'):
+            opening_date = vendor.created_at.date() if vendor.created_at else None
+            ledger_rows.append({
+                "date": opening_date.isoformat() if opening_date else None,
+                "voucher": "OPENING",
+                "description": opening_desc,
+                "referenceType": None,
+                "referenceId": None,
+                "debit": Decimal('0.00'),
+                "credit": opening_payable,
+                "balance": Decimal('0.00'),
+                "_sort_ts": vendor.created_at,
+            })
+
+        for inv in all_invoices:
+            net = Decimal(str(inv.net_total))
+            ledger_rows.append({
+                "date": inv.date.isoformat() if inv.date else None,
+                "voucher": inv.invoice_number,
+                "description": f"Invoice - {inv.payment_term}",
+                "referenceType": "invoice",
+                "referenceId": inv.id,
+                "debit": Decimal('0.00'),
+                "credit": net,
+                "balance": Decimal('0.00'),
+                "_sort_ts": inv.created_at,
+            })
+            if inv.advance_applied > 0:
+                ledger_rows.append({
+                    "date": inv.date.isoformat() if inv.date else None,
+                    "voucher": f"ADV-{inv.invoice_number}",
+                    "description": "Advance Applied",
+                    "referenceType": "invoice",
+                    "referenceId": inv.id,
+                    "debit": Decimal(str(inv.advance_applied)),
+                    "credit": Decimal('0.00'),
+                    "balance": Decimal('0.00'),
+                    "_sort_ts": inv.created_at,
+                })
+
+        for pay in all_payments:
+            description = f"Payment - {pay.invoice.invoice_number}" if pay.invoice else "General Payment"
+            ledger_rows.append({
+                "date": pay.date.isoformat() if pay.date else None,
+                "voucher": pay.payment_number,
+                "description": description,
+                "referenceType": "payment",
+                "referenceId": pay.id,
+                "debit": Decimal(str(pay.amount_paid)),
+                "credit": Decimal('0.00'),
+                "balance": Decimal('0.00'),
+                "_sort_ts": pay.created_at,
+            })
+
+        ledger_rows.sort(key=lambda r: r['_sort_ts'])
+
+        running_balance = Decimal('0.00')
+        for row in ledger_rows:
+            debit_val = Decimal(str(row['debit']))
+            credit_val = Decimal(str(row['credit']))
+            running_balance += credit_val - debit_val
+            row['balance'] = running_balance
+
+        final_balance = ledger_rows[-1]['balance'] if ledger_rows else Decimal('0.00')
+
+        if final_balance >= 0:
+            remaining_balance = final_balance
+            available_advance = Decimal('0.00')
+        else:
+            remaining_balance = Decimal('0.00')
+            available_advance = abs(final_balance)
+
+        summary = {
+            "creditPurchases": credit_purchases,
+            "cashPurchases": cash_purchases,
+            "advanceApplied": total_advance_applied,
+            "totalPaid": total_paid_out,
+            "remainingBalance": remaining_balance,
+            "totalInvoices": total_invoices,
+            "openingPayable": opening_payable,
+            "availableAdvance": available_advance,
+            "closingBalance": remaining_balance,
+        }
+
+        final_payment_details = {
+            "openingPayable": opening_payable,
+            "totalPurchases": total_purchases_amt,
+            "paymentsMade": total_paid_out,
+            "advanceUsed": total_advance_applied,
+            "totalPaid": total_paid_out,
+            "availableAdvance": available_advance,
+            "remainingBalance": remaining_balance,
+        }
+
+        for row in ledger_rows:
+            row.pop('_sort_ts', None)
+
+        vendor_info = {
+            "vendorId": vendor.vendor_id,
+            "vendorName": vendor.vendor_name,
+            "phone": vendor.phone,
+        }
+
+        return Response({
+            "vendor": vendor_info,
+            "summary": summary,
+            "ledger": ledger_rows,
+            "finalPaymentDetails": final_payment_details,
+        })
 
 
 class PurchaseInvoiceViewSet(PurchaseCamelCaseMixin, viewsets.ModelViewSet):

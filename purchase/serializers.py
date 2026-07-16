@@ -143,41 +143,38 @@ class PurchaseItemNestedSerializer(serializers.ModelSerializer):
         read_only_fields = ["id", "total"]
 
 
+class PurchaseInvoiceVendorRefSerializer(serializers.Serializer):
+    vendor_id = serializers.IntegerField()
+    vendor_name = serializers.CharField()
+    phone = serializers.CharField(allow_blank=True, required=False)
+
+
 class PurchaseInvoiceListSerializer(serializers.ModelSerializer):
     """Lightweight serializer for the invoice list table."""
 
-    vendor_name = serializers.CharField(source='vendor.vendor_name', read_only=True)
-    total = serializers.DecimalField(source='net_total', max_digits=12, decimal_places=2, read_only=True)
-    paid = serializers.DecimalField(source='paid_amount', max_digits=12, decimal_places=2, read_only=True)
-    pending = serializers.SerializerMethodField()
+    vendor = PurchaseInvoiceVendorRefSerializer()
+    invoice_status = serializers.CharField(source='status', read_only=True)
+    subtotal = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    net_total = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    balance_due = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    payment_status = serializers.CharField(read_only=True)
 
     class Meta:
         model = PurchaseInvoice
         fields = [
             'id',
             'invoice_number',
-            'vendor_name',
-            'total',
-            'paid',
-            'pending',
+            'bill_number',
             'date',
-            'status',
+            'payment_term',
+            'invoice_status',
+            'payment_status',
+            'subtotal',
+            'net_total',
+            'balance_due',
+            'vendor',
         ]
         read_only_fields = fields
-
-    def get_pending(self, obj):
-        value = obj.balance_due
-        if abs(value) < Decimal('0.01'):
-            value = Decimal('0.00')
-        else:
-            value = value.quantize(Decimal('0.01'))
-        return str(value)
-
-
-class PurchaseInvoiceVendorRefSerializer(serializers.Serializer):
-    vendor_id = serializers.IntegerField()
-    vendor_name = serializers.CharField()
-    phone = serializers.CharField(allow_blank=True, required=False)
 
 
 class ExpenseSerializer(serializers.ModelSerializer):
