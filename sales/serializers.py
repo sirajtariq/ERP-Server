@@ -149,6 +149,7 @@ class SalesInvoiceListSerializer(serializers.ModelSerializer):
     paid = serializers.DecimalField(source='paid_amount', max_digits=12, decimal_places=2, read_only=True)
     pending = serializers.SerializerMethodField()
     paymentStatus = serializers.SerializerMethodField()
+    invoiceStatus = serializers.CharField(source='status', read_only=True)
 
     class Meta:
         model = SalesInvoice
@@ -160,6 +161,7 @@ class SalesInvoiceListSerializer(serializers.ModelSerializer):
             'paid',
             'pending',
             'paymentStatus',
+            'invoiceStatus',
             'date',
         ]
         read_only_fields = fields
