@@ -1611,6 +1611,22 @@ class ExpenseModelTests(TestCase):
             self.assertEqual(exp.category, cat,
                              f"Category should accept arbitrary text: {cat}")
 
+    def test_expense_optional_fields(self):
+        exp = Expense.objects.create(
+            category="Office", amount=Decimal("100.00"),
+            person_supplier="John Doe", paid_by="Jane Doe"
+        )
+        self.assertEqual(exp.person_supplier, "John Doe")
+        self.assertEqual(exp.paid_by, "Jane Doe")
+
+    def test_expense_item_cascade_delete(self):
+        from purchase.models import ExpenseItem
+        exp = Expense.objects.create(category="Office", amount=Decimal("100.00"))
+        ExpenseItem.objects.create(expense=exp, item_name="Pen", quantity=Decimal("10"), amount=Decimal("10.00"))
+        
+        Expense.all_objects.filter(id=exp.id).delete()
+        self.assertEqual(ExpenseItem.objects.count(), 0)
+
 
 # =====================================================================
 # 13. ExpenseViewSetTests
@@ -1639,12 +1655,42 @@ class ExpenseViewSetTests(APITestCase):
             "date": kwargs.get("date", str(date.today())),
             "notes": kwargs.get("notes", ""),
         }
+        if "items" in kwargs:
+            data["items"] = kwargs["items"]
+            if "amount" not in kwargs:
+                data.pop("amount", None)
+        if "personSupplier" in kwargs:
+            data["personSupplier"] = kwargs["personSupplier"]
+        if "paidBy" in kwargs:
+            data["paidBy"] = kwargs["paidBy"]
         return self.client.post(self.url, data, format="json")
 
     def test_create_expense(self):
         resp = self._create_expense()
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
         self.assertIn("expense_number", resp.data)
+
+    def test_create_expense_with_items_computes_amount(self):
+        resp = self._create_expense(
+            items=[
+                {"itemName": "Pen", "quantity": "10", "amount": "50.00"},
+                {"itemName": "Paper", "quantity": "5", "amount": "25.00"}
+            ]
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Decimal(str(resp.data["amount"])), Decimal("75.00"), "Amount should be sum of items")
+        self.assertEqual(len(resp.data["items"]), 2)
+
+    def test_create_expense_no_items_manual_amount(self):
+        resp = self._create_expense(amount="150.00")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Decimal(str(resp.data["amount"])), Decimal("150.00"))
+
+    def test_person_supplier_and_paid_by_saved_and_returned(self):
+        resp = self._create_expense(personSupplier="Alice", paidBy="Bob")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data["person_supplier"], "Alice")
+        self.assertEqual(resp.data["paid_by"], "Bob")
 
     def test_list_expenses(self):
         self._create_expense()
@@ -1673,7 +1719,7 @@ class ExpenseViewSetTests(APITestCase):
     def test_expense_shape(self):
         resp = self._create_expense()
         for field in ["id", "expense_number", "category", "amount",
-                       "payment_method", "date", "notes", "created_at"]:
+                       "person_supplier", "paid_by", "payment_method", "date", "notes", "created_at", "items"]:
             self.assertIn(field, resp.data, f"Expense must include '{field}'")
 
     # ── Query params ─────────────────────────────────────────────────
@@ -2038,7 +2084,7 @@ class PurchaseCamelCaseContractTests(APITestCase):
         self.assertNotIn("applied_to_invoice", pay)
 
     def test_expense_camelcase(self):
-        Expense.objects.create(category="Office", amount=Decimal("50.00"))
+        Expense.objects.create(category="Office", amount=Decimal("50.00"), person_supplier="Acme", paid_by="John")
         resp = self.client.get("/api/purchase/expenses/")
         rendered = json.loads(resp.content)
         exp = rendered["results"][0]
@@ -2046,6 +2092,10 @@ class PurchaseCamelCaseContractTests(APITestCase):
         self.assertNotIn("expense_number", exp)
         self.assertIn("paymentMethod", exp)
         self.assertNotIn("payment_method", exp)
+        self.assertIn("personSupplier", exp)
+        self.assertNotIn("person_supplier", exp)
+        self.assertIn("paidBy", exp)
+        self.assertNotIn("paid_by", exp)
         self.assertIn("createdAt", exp)
         self.assertNotIn("created_at", exp)
 

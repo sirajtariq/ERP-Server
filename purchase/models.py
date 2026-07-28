@@ -269,6 +269,8 @@ class Expense(SoftDeleteModel):
     expense_number = models.CharField(max_length=50, unique=True, editable=False)
     category = models.CharField(max_length=255)
     amount = models.DecimalField(max_digits=12, decimal_places=2)
+    person_supplier = models.CharField(max_length=255, blank=True)
+    paid_by = models.CharField(max_length=255, blank=True)
     payment_method = models.CharField(max_length=50, blank=True)
     date = models.DateField(default=timezone.localdate)
     notes = models.TextField(blank=True)
@@ -307,3 +309,22 @@ class Expense(SoftDeleteModel):
 
     def __str__(self) -> str:
         return f"{self.expense_number} — {self.category}"
+
+
+class ExpenseItem(models.Model):
+    """Line item for an itemized expense."""
+
+    expense = models.ForeignKey(
+        Expense,
+        on_delete=models.CASCADE,
+        related_name="items",
+    )
+    item_name = models.CharField(max_length=255)
+    quantity = models.DecimalField(max_digits=10, decimal_places=2)
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+
+    class Meta:
+        ordering = ["id"]
+
+    def __str__(self) -> str:
+        return f"{self.item_name} x{self.quantity}"
