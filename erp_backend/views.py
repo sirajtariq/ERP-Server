@@ -6,7 +6,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework_simplejwt.views import TokenObtainPairView
 
-from erp_backend.serializers import UserSerializer, CustomTokenObtainPairSerializer, PasswordChangeSerializer, UserMeSerializer
+from erp_backend.serializers import UserSerializer, UserReadSerializer, CustomTokenObtainPairSerializer, PasswordChangeSerializer, UserMeSerializer
 from erp_backend.permissions import IsAdminUser, _user_in_group, ADMIN_GROUP
 
 class CustomTokenObtainPairView(TokenObtainPairView):
@@ -72,8 +72,34 @@ class UserViewSet(viewsets.ModelViewSet):
     Requires Admin role (superuser or Admin group).
     """
     queryset = User.objects.all().order_by('-date_joined')
-    serializer_class = UserSerializer
     permission_classes = [IsAdminUser]
+
+    def get_serializer_class(self):
+        if self.action in ['list', 'retrieve']:
+            return UserReadSerializer
+        return UserSerializer
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        self.perform_create(serializer)
+        
+        read_serializer = UserReadSerializer(serializer.instance)
+        headers = self.get_success_headers(read_serializer.data)
+        return Response(read_serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        self.perform_update(serializer)
+
+        if getattr(instance, '_prefetched_objects_cache', None):
+            instance._prefetched_objects_cache = {}
+
+        read_serializer = UserReadSerializer(instance)
+        return Response(read_serializer.data)
 
 
 class UserMeAPIView(generics.RetrieveAPIView):

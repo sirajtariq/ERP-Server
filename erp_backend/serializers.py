@@ -1,5 +1,32 @@
 from django.contrib.auth.models import User, Group
 from rest_framework import serializers
+from .models import UserProfile
+
+class UserProfileSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = UserProfile
+        fields = [
+            'fullname', 'phone', 'cnic', 'address', 'designation',
+            'dateofjoining', 'employmenttype', 'basicsalary', 'salarytype'
+        ]
+
+class UserReadSerializer(serializers.ModelSerializer):
+    isActive = serializers.BooleanField(source='is_active')
+    dateJoined = serializers.DateTimeField(source='date_joined')
+    role = serializers.SerializerMethodField()
+    profile = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = ['id', 'username', 'email', 'isActive', 'dateJoined', 'role', 'profile']
+
+    def get_role(self, obj):
+        return CustomTokenObtainPairSerializer._resolve_role(obj)
+        
+    def get_profile(self, obj):
+        if hasattr(obj, 'profile') and obj.profile:
+            return UserProfileSerializer(obj.profile).data
+        return None
 
 class UserSerializer(serializers.ModelSerializer):
     role = serializers.ChoiceField(
