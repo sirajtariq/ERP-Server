@@ -27,3 +27,31 @@ class UserProfile(models.Model):
 
     def __str__(self):
         return self.fullname
+
+class BusinessSettings(models.Model):
+    """
+    Singleton model to hold business identity settings.
+    """
+    logo = models.ImageField(upload_to='business_logo/', blank=True, null=True)
+    business_name = models.CharField(max_length=255)
+    contact = models.CharField(max_length=50, blank=True)
+    whatsapp = models.CharField(max_length=50, blank=True)
+    email = models.EmailField(blank=True)
+    address = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def save(self, *args, **kwargs):
+        self.pk = 1
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        pass
+
+    @classmethod
+    def get_solo(cls):
+        obj, created = cls.objects.get_or_create(pk=1, defaults={"business_name": "My Business"})
+        return obj
+
+    def __str__(self):
+        return self.business_name or "Business Settings"

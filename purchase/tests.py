@@ -438,17 +438,17 @@ class PurchaseInvoiceModelTests(TestCase):
 
     def test_total_line_discount(self):
         inv = self._make_invoice()
-        self._add_item(inv, discount=Decimal("50.00"))
-        self._add_item(inv, discount=Decimal("30.00"))
-        self.assertEqual(inv.total_line_discount, Decimal("80.00"),
-                         "total_line_discount = sum of all item discounts")
+        self._add_item(inv, qty=10, price=Decimal("100.00"), discount=Decimal("10.00")) # 1000 * 10% = 100
+        self._add_item(inv, qty=5, price=Decimal("200.00"), discount=Decimal("5.00"))  # 1000 * 5% = 50
+        self.assertEqual(inv.total_line_discount, Decimal("150.00"),
+                         "total_line_discount = sum of all item discounts in currency amount")
 
     def test_tax_amount_calculated_on_subtotal_minus_line_discount(self):
         """Tax = (subtotal - total_line_discount) * vat_percentage / 100.
         Per PROJECT_ANALYSIS.md, purchase tax is on (subtotal - total_line_discount),
         BEFORE invoice_discount."""
         inv = self._make_invoice(vat_percentage=Decimal("10.00"))
-        self._add_item(inv, qty=10, price=Decimal("100.00"), discount=Decimal("100.00"))
+        self._add_item(inv, qty=10, price=Decimal("100.00"), discount=Decimal("10.00"))
         # subtotal = 1000, line_discount = 100, base = 900
         # tax = 900 * 10/100 = 90
         self.assertEqual(inv.tax_amount, Decimal("90.00"),
@@ -457,13 +457,13 @@ class PurchaseInvoiceModelTests(TestCase):
     def test_net_total_formula(self):
         inv = self._make_invoice(
             vat_percentage=Decimal("10.00"),
-            invoice_discount=Decimal("50.00"),
+            invoice_discount=Decimal("5.00"),
         )
-        self._add_item(inv, qty=10, price=Decimal("100.00"), discount=Decimal("100.00"))
-        # subtotal=1000, line_disc=100, base=900, tax=90, invoice_disc=50
-        # net_total = 900 + 90 - 50 = 940
-        self.assertEqual(inv.net_total, Decimal("940.00"),
-                         "net_total = subtotal - total_line_discount + tax_amount - invoice_discount")
+        self._add_item(inv, qty=10, price=Decimal("100.00"), discount=Decimal("10.00"))
+        # subtotal=1000, line_disc=100, base=900, tax=90, invoice_disc=900*5%=45
+        # net_total = 900 + 90 - 45 = 945
+        self.assertEqual(inv.net_total, Decimal("945.00"),
+                         "net_total = subtotal - total_line_discount + tax_amount - deducted_invoice_discount")
 
     def test_balance_due_formula(self):
         inv = self._make_invoice(paid_amount=Decimal("200.00"),
@@ -670,14 +670,23 @@ class PurchaseInvoiceSerializerValidationTests(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST,
                          "Negative line item discount should be rejected")
 
-    def test_invoice_discount_pushing_net_total_negative_rejected(self):
+    def test_over_100_discount_rejected(self):
+        payload = _invoice_payload(self.vendor, items=[
+            {"productName": "W", "units": "pcs", "quantity": "1",
+             "purchasePrice": "10.00", "discount": "101.00"},
+        ])
+        resp = self.client.post(self.url, payload, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST,
+                         "Line item discount > 100 should be rejected")
+
+    def test_invoice_discount_over_100_rejected(self):
         payload = _invoice_payload(
             self.vendor,
-            invoice_discount="9999.00",
+            invoice_discount="100.01",
         )
         resp = self.client.post(self.url, payload, format="json")
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST,
-                         "invoice_discount exceeding net total should be rejected")
+                         "invoice_discount > 100 should be rejected")
 
     def test_at_least_one_item_required(self):
         payload = _invoice_payload(self.vendor, items=[])
@@ -1063,11 +1072,11 @@ class PurchaseItemModelTests(TestCase):
             product_name="Gadget",
             quantity=Decimal("5"),
             purchase_price=Decimal("200.00"),
-            discount=Decimal("50.00"),
+            discount=Decimal("10.00"),
         )
-        expected = Decimal("5") * Decimal("200.00") - Decimal("50.00")  # 950
+        expected = Decimal("5") * Decimal("200.00") - (Decimal("5") * Decimal("200.00") * Decimal("0.10"))  # 900
         self.assertEqual(item.total, expected,
-                         "total = (quantity * purchase_price) - discount")
+                         "total = (quantity * purchase_price) - ((quantity * purchase_price) * discount/100)")
 
     def test_cascade_delete_on_invoice_hard_delete(self):
         PurchaseItem.objects.create(
@@ -1611,6 +1620,22 @@ class ExpenseModelTests(TestCase):
             self.assertEqual(exp.category, cat,
                              f"Category should accept arbitrary text: {cat}")
 
+    def test_expense_optional_fields(self):
+        exp = Expense.objects.create(
+            category="Office", amount=Decimal("100.00"),
+            person_supplier="John Doe", paid_by="Jane Doe"
+        )
+        self.assertEqual(exp.person_supplier, "John Doe")
+        self.assertEqual(exp.paid_by, "Jane Doe")
+
+    def test_expense_item_cascade_delete(self):
+        from purchase.models import ExpenseItem
+        exp = Expense.objects.create(category="Office", amount=Decimal("100.00"))
+        ExpenseItem.objects.create(expense=exp, item_name="Pen", quantity=Decimal("10"), amount=Decimal("10.00"))
+        
+        Expense.all_objects.filter(id=exp.id).delete()
+        self.assertEqual(ExpenseItem.objects.count(), 0)
+
 
 # =====================================================================
 # 13. ExpenseViewSetTests
@@ -1639,12 +1664,42 @@ class ExpenseViewSetTests(APITestCase):
             "date": kwargs.get("date", str(date.today())),
             "notes": kwargs.get("notes", ""),
         }
+        if "items" in kwargs:
+            data["items"] = kwargs["items"]
+            if "amount" not in kwargs:
+                data.pop("amount", None)
+        if "personSupplier" in kwargs:
+            data["personSupplier"] = kwargs["personSupplier"]
+        if "paidBy" in kwargs:
+            data["paidBy"] = kwargs["paidBy"]
         return self.client.post(self.url, data, format="json")
 
     def test_create_expense(self):
         resp = self._create_expense()
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
         self.assertIn("expense_number", resp.data)
+
+    def test_create_expense_with_items_computes_amount(self):
+        resp = self._create_expense(
+            items=[
+                {"itemName": "Pen", "quantity": "10", "amount": "50.00"},
+                {"itemName": "Paper", "quantity": "5", "amount": "25.00"}
+            ]
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Decimal(str(resp.data["amount"])), Decimal("75.00"), "Amount should be sum of items")
+        self.assertEqual(len(resp.data["items"]), 2)
+
+    def test_create_expense_no_items_manual_amount(self):
+        resp = self._create_expense(amount="150.00")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Decimal(str(resp.data["amount"])), Decimal("150.00"))
+
+    def test_person_supplier_and_paid_by_saved_and_returned(self):
+        resp = self._create_expense(personSupplier="Alice", paidBy="Bob")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data["person_supplier"], "Alice")
+        self.assertEqual(resp.data["paid_by"], "Bob")
 
     def test_list_expenses(self):
         self._create_expense()
@@ -1673,7 +1728,7 @@ class ExpenseViewSetTests(APITestCase):
     def test_expense_shape(self):
         resp = self._create_expense()
         for field in ["id", "expense_number", "category", "amount",
-                       "payment_method", "date", "notes", "created_at"]:
+                       "person_supplier", "paid_by", "payment_method", "date", "notes", "created_at", "items"]:
             self.assertIn(field, resp.data, f"Expense must include '{field}'")
 
     # ── Query params ─────────────────────────────────────────────────
@@ -2038,7 +2093,7 @@ class PurchaseCamelCaseContractTests(APITestCase):
         self.assertNotIn("applied_to_invoice", pay)
 
     def test_expense_camelcase(self):
-        Expense.objects.create(category="Office", amount=Decimal("50.00"))
+        Expense.objects.create(category="Office", amount=Decimal("50.00"), person_supplier="Acme", paid_by="John")
         resp = self.client.get("/api/purchase/expenses/")
         rendered = json.loads(resp.content)
         exp = rendered["results"][0]
@@ -2046,6 +2101,10 @@ class PurchaseCamelCaseContractTests(APITestCase):
         self.assertNotIn("expense_number", exp)
         self.assertIn("paymentMethod", exp)
         self.assertNotIn("payment_method", exp)
+        self.assertIn("personSupplier", exp)
+        self.assertNotIn("person_supplier", exp)
+        self.assertIn("paidBy", exp)
+        self.assertNotIn("paid_by", exp)
         self.assertIn("createdAt", exp)
         self.assertNotIn("created_at", exp)
 

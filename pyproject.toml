@@ -10,4 +10,5 @@ dependencies = [
     "djangorestframework-camel-case>=1.4.2",
     "djangorestframework-simplejwt>=5.5.1",
     "drf-yasg>=1.21.15",
+    "pillow>=12.3.0",
 ]

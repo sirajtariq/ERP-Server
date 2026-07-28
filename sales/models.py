@@ -92,7 +92,7 @@ class SalesInvoice(SoftDeleteModel):
     payment_reference = models.CharField(max_length=255, blank=True, null=True)
     notes = models.TextField(blank=True, null=True)
     vat_percentage = models.DecimalField(max_digits=5, decimal_places=2, default=0.0)
-    invoice_discount = models.DecimalField(max_digits=12, decimal_places=2, default=0.0)
+    invoice_discount = models.DecimalField(max_digits=12, decimal_places=2, default=0.0, help_text="Discount percentage (0-100)")
     
     STATUS_CHOICES = (
         ('Draft', 'Draft'),
@@ -113,15 +113,17 @@ class SalesInvoice(SoftDeleteModel):
 
     @property
     def total_line_discount(self):
-        return sum((item.discount for item in self.items.all()), Decimal('0.00'))
+        return sum(((item.quantity * item.rate) * (item.discount / Decimal('100')) for item in self.items.all()), Decimal('0.00'))
 
     @property
     def tax_amount(self):
-        return (self.subtotal - Decimal(str(self.invoice_discount))) * (Decimal(str(self.vat_percentage)) / Decimal('100'))
+        deducted_invoice_discount = self.subtotal * (Decimal(str(self.invoice_discount)) / Decimal('100'))
+        return (self.subtotal - deducted_invoice_discount) * (Decimal(str(self.vat_percentage)) / Decimal('100'))
 
     @property
     def net_total(self):
-        return (self.subtotal - Decimal(str(self.invoice_discount))) + self.tax_amount
+        deducted_invoice_discount = self.subtotal * (Decimal(str(self.invoice_discount)) / Decimal('100'))
+        return (self.subtotal - deducted_invoice_discount) + self.tax_amount
 
     @property
     def balance_due(self):
@@ -174,14 +176,14 @@ class SalesItem(models.Model):
     units = models.CharField(max_length=50, default='pcs')
     quantity = models.DecimalField(max_digits=10, decimal_places=2)
     rate = models.DecimalField(max_digits=12, decimal_places=2)
-    discount = models.DecimalField(max_digits=12, decimal_places=2, default=0.0)
+    discount = models.DecimalField(max_digits=12, decimal_places=2, default=0.0, help_text="Discount percentage (0-100)")
 
     class Meta:
         ordering = ["id"]
 
     @property
     def total(self):
-        return (self.quantity * self.rate) - self.discount
+        return (self.quantity * self.rate) - ((self.quantity * self.rate) * (self.discount / Decimal('100')))
 
     def __str__(self) -> str:
         return f"{self.item_name} x{self.quantity}"

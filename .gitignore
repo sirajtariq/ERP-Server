@@ -13,3 +13,5 @@ staticfiles/
 .idea/
 .vscode/
 *.swp
+
+media/

@@ -149,6 +149,7 @@ class SalesInvoiceListSerializer(serializers.ModelSerializer):
     paid = serializers.DecimalField(source='paid_amount', max_digits=12, decimal_places=2, read_only=True)
     pending = serializers.SerializerMethodField()
     paymentStatus = serializers.SerializerMethodField()
+    invoiceStatus = serializers.CharField(source='status', read_only=True)
 
     class Meta:
         model = SalesInvoice
@@ -160,6 +161,7 @@ class SalesInvoiceListSerializer(serializers.ModelSerializer):
             'paid',
             'pending',
             'paymentStatus',
+            'invoiceStatus',
             'date',
         ]
         read_only_fields = fields
@@ -343,28 +345,26 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             
             if qty <= 0 or rate <= 0:
                 raise serializers.ValidationError({"items": "Quantity and rate must be greater than zero."})
-            if disc < 0:
-                raise serializers.ValidationError({"items": "Line item discount cannot be negative."})
+            if disc < 0 or disc > 100:
+                raise serializers.ValidationError({"items": "Line item discount percentage must be between 0 and 100."})
             
             subtotal += qty * rate
-            total_line_discount += disc
+            total_line_discount += (qty * rate) * (disc / Decimal('100'))
 
         # 5. Header level charges and discounts calculations
         vat_percentage = Decimal(str(attrs.get('vat_percentage', self.instance.vat_percentage if self.instance else 0)))
         invoice_discount = Decimal(str(attrs.get('invoice_discount', self.instance.invoice_discount if self.instance else 0)))
 
-        if invoice_discount < 0:
-            raise serializers.ValidationError({"invoice_discount": "Invoice discount cannot be negative."})
+        if invoice_discount < 0 or invoice_discount > 100:
+            raise serializers.ValidationError({"invoice_discount": "Invoice discount percentage must be between 0 and 100."})
 
+        # Base amount is just subtotal because items have already subtracted their discounts in item.total? Wait!
+        # In the serializer, we just calculated subtotal = sum(qty * rate), and total_line_discount = sum(discount_amounts).
+        # So base_amount should be subtotal - total_line_discount. This is correct for the serializer manually computing it.
         base_amount = subtotal - total_line_discount
-        tax_amount = base_amount * (vat_percentage / Decimal('100'))
-        net_total = base_amount + tax_amount - invoice_discount
-        
-        # Prevent discount from driving net total into negative
-        if net_total < 0:
-            raise serializers.ValidationError(
-                {"invoice_discount": f"Invoice discount cannot exceed the net total amount ({base_amount + tax_amount:.2f})."}
-            )
+        deducted_invoice_discount = base_amount * (invoice_discount / Decimal('100'))
+        tax_amount = (base_amount - deducted_invoice_discount) * (vat_percentage / Decimal('100'))
+        net_total = (base_amount - deducted_invoice_discount) + tax_amount
 
         paid_amount = Decimal(str(attrs.get('paid_amount', self.instance.paid_amount if self.instance else 0)))
 
