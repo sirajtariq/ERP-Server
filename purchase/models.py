@@ -101,7 +101,7 @@ class PurchaseInvoice(SoftDeleteModel):
     payment_reference = models.CharField(max_length=255, blank=True)
     notes = models.TextField(blank=True)
     vat_percentage = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal('0.00'))
-    invoice_discount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
+    invoice_discount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'), help_text="Discount percentage (0-100)")
     
     STATUS_CHOICES = (
         ('Draft', 'Draft'),
@@ -119,7 +119,7 @@ class PurchaseInvoice(SoftDeleteModel):
 
     @property
     def total_line_discount(self):
-        return sum((item.discount for item in self.items.all()), Decimal('0.00'))
+        return sum(((item.quantity * item.purchase_price) * (item.discount / Decimal('100')) for item in self.items.all()), Decimal('0.00'))
 
     @property
     def tax_amount(self):
@@ -127,7 +127,9 @@ class PurchaseInvoice(SoftDeleteModel):
 
     @property
     def net_total(self):
-        return self.subtotal - self.total_line_discount + self.tax_amount - self.invoice_discount
+        base_amount = self.subtotal - self.total_line_discount
+        deducted_invoice_discount = base_amount * (self.invoice_discount / Decimal('100'))
+        return base_amount + self.tax_amount - deducted_invoice_discount
 
     @property
     def balance_due(self):
@@ -194,14 +196,14 @@ class PurchaseItem(models.Model):
     units = models.CharField(max_length=50, blank=True)
     quantity = models.DecimalField(max_digits=10, decimal_places=2)
     purchase_price = models.DecimalField(max_digits=12, decimal_places=2)
-    discount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
+    discount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'), help_text="Discount percentage (0-100)")
 
     class Meta:
         ordering = ["id"]
 
     @property
     def total(self):
-        return (self.quantity * self.purchase_price) - self.discount
+        return (self.quantity * self.purchase_price) - ((self.quantity * self.purchase_price) * (self.discount / Decimal('100')))
 
     def __str__(self) -> str:
         return f"{self.product_name} x{self.quantity}"

@@ -438,17 +438,17 @@ class PurchaseInvoiceModelTests(TestCase):
 
     def test_total_line_discount(self):
         inv = self._make_invoice()
-        self._add_item(inv, discount=Decimal("50.00"))
-        self._add_item(inv, discount=Decimal("30.00"))
-        self.assertEqual(inv.total_line_discount, Decimal("80.00"),
-                         "total_line_discount = sum of all item discounts")
+        self._add_item(inv, qty=10, price=Decimal("100.00"), discount=Decimal("10.00")) # 1000 * 10% = 100
+        self._add_item(inv, qty=5, price=Decimal("200.00"), discount=Decimal("5.00"))  # 1000 * 5% = 50
+        self.assertEqual(inv.total_line_discount, Decimal("150.00"),
+                         "total_line_discount = sum of all item discounts in currency amount")
 
     def test_tax_amount_calculated_on_subtotal_minus_line_discount(self):
         """Tax = (subtotal - total_line_discount) * vat_percentage / 100.
         Per PROJECT_ANALYSIS.md, purchase tax is on (subtotal - total_line_discount),
         BEFORE invoice_discount."""
         inv = self._make_invoice(vat_percentage=Decimal("10.00"))
-        self._add_item(inv, qty=10, price=Decimal("100.00"), discount=Decimal("100.00"))
+        self._add_item(inv, qty=10, price=Decimal("100.00"), discount=Decimal("10.00"))
         # subtotal = 1000, line_discount = 100, base = 900
         # tax = 900 * 10/100 = 90
         self.assertEqual(inv.tax_amount, Decimal("90.00"),
@@ -457,13 +457,13 @@ class PurchaseInvoiceModelTests(TestCase):
     def test_net_total_formula(self):
         inv = self._make_invoice(
             vat_percentage=Decimal("10.00"),
-            invoice_discount=Decimal("50.00"),
+            invoice_discount=Decimal("5.00"),
         )
-        self._add_item(inv, qty=10, price=Decimal("100.00"), discount=Decimal("100.00"))
-        # subtotal=1000, line_disc=100, base=900, tax=90, invoice_disc=50
-        # net_total = 900 + 90 - 50 = 940
-        self.assertEqual(inv.net_total, Decimal("940.00"),
-                         "net_total = subtotal - total_line_discount + tax_amount - invoice_discount")
+        self._add_item(inv, qty=10, price=Decimal("100.00"), discount=Decimal("10.00"))
+        # subtotal=1000, line_disc=100, base=900, tax=90, invoice_disc=900*5%=45
+        # net_total = 900 + 90 - 45 = 945
+        self.assertEqual(inv.net_total, Decimal("945.00"),
+                         "net_total = subtotal - total_line_discount + tax_amount - deducted_invoice_discount")
 
     def test_balance_due_formula(self):
         inv = self._make_invoice(paid_amount=Decimal("200.00"),
@@ -670,14 +670,23 @@ class PurchaseInvoiceSerializerValidationTests(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST,
                          "Negative line item discount should be rejected")
 
-    def test_invoice_discount_pushing_net_total_negative_rejected(self):
+    def test_over_100_discount_rejected(self):
+        payload = _invoice_payload(self.vendor, items=[
+            {"productName": "W", "units": "pcs", "quantity": "1",
+             "purchasePrice": "10.00", "discount": "101.00"},
+        ])
+        resp = self.client.post(self.url, payload, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST,
+                         "Line item discount > 100 should be rejected")
+
+    def test_invoice_discount_over_100_rejected(self):
         payload = _invoice_payload(
             self.vendor,
-            invoice_discount="9999.00",
+            invoice_discount="100.01",
         )
         resp = self.client.post(self.url, payload, format="json")
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST,
-                         "invoice_discount exceeding net total should be rejected")
+                         "invoice_discount > 100 should be rejected")
 
     def test_at_least_one_item_required(self):
         payload = _invoice_payload(self.vendor, items=[])
@@ -1063,11 +1072,11 @@ class PurchaseItemModelTests(TestCase):
             product_name="Gadget",
             quantity=Decimal("5"),
             purchase_price=Decimal("200.00"),
-            discount=Decimal("50.00"),
+            discount=Decimal("10.00"),
         )
-        expected = Decimal("5") * Decimal("200.00") - Decimal("50.00")  # 950
+        expected = Decimal("5") * Decimal("200.00") - (Decimal("5") * Decimal("200.00") * Decimal("0.10"))  # 900
         self.assertEqual(item.total, expected,
-                         "total = (quantity * purchase_price) - discount")
+                         "total = (quantity * purchase_price) - ((quantity * purchase_price) * discount/100)")
 
     def test_cascade_delete_on_invoice_hard_delete(self):
         PurchaseItem.objects.create(
