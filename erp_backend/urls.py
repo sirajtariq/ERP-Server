@@ -16,7 +16,10 @@ from rest_framework import permissions
 from rest_framework.routers import DefaultRouter
 from rest_framework_simplejwt.views import TokenRefreshView, TokenBlacklistView
 
-from erp_backend.views import UserViewSet, CustomTokenObtainPairView, PasswordChangeAPIView, UserMeAPIView
+from django.conf import settings
+from django.conf.urls.static import static
+
+from erp_backend.views import UserViewSet, CustomTokenObtainPairView, PasswordChangeAPIView, UserMeAPIView, BusinessSettingsAPIView
 
 router = DefaultRouter()
 router.register(r"users", UserViewSet, basename="user")
@@ -61,6 +64,7 @@ urlpatterns = [
     path("api/auth/password/change/", PasswordChangeAPIView.as_view(), name="password_change"),
     path("api/auth/me/", UserMeAPIView.as_view(), name="user_me"),
     # Core APIs
+    path("api/settings/business/", BusinessSettingsAPIView.as_view(), name="business_settings"),
     path("api/", include(router.urls)),
     # Module APIs
     path("api/sales/", include("sales.urls")),
@@ -82,3 +86,6 @@ urlpatterns = [
         name="schema-json",
     ),
 ]
+
+if settings.DEBUG:
+    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

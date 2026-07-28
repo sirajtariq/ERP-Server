@@ -183,3 +183,13 @@ class UserMeSerializer(serializers.ModelSerializer):
         return CustomTokenObtainPairSerializer._resolve_role(obj)
 
 
+from .models import BusinessSettings
+
+class BusinessSettingsSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = BusinessSettings
+        fields = [
+            'logo', 'business_name', 'contact', 'whatsapp', 
+            'email', 'address', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['created_at', 'updated_at']

@@ -6,8 +6,10 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework_simplejwt.views import TokenObtainPairView
 
-from erp_backend.serializers import UserSerializer, UserReadSerializer, CustomTokenObtainPairSerializer, PasswordChangeSerializer, UserMeSerializer
+from erp_backend.serializers import UserSerializer, UserReadSerializer, CustomTokenObtainPairSerializer, PasswordChangeSerializer, UserMeSerializer, BusinessSettingsSerializer
 from erp_backend.permissions import IsAdminUser, _user_in_group, ADMIN_GROUP
+from erp_backend.models import BusinessSettings
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 
 class CustomTokenObtainPairView(TokenObtainPairView):
     serializer_class = CustomTokenObtainPairSerializer
@@ -114,3 +116,20 @@ class UserMeAPIView(generics.RetrieveAPIView):
     def get_object(self):
         return self.request.user
 
+
+class BusinessSettingsAPIView(generics.RetrieveUpdateAPIView):
+    """
+    API endpoint for getting and updating the global business settings singleton.
+    """
+    serializer_class = BusinessSettingsSerializer
+    parser_classes = (MultiPartParser, FormParser, JSONParser)
+
+    def get_permissions(self):
+        if self.request.method in ['PUT', 'PATCH']:
+            self.permission_classes = [IsAdminUser]
+        else:
+            self.permission_classes = [IsAuthenticated]
+        return super().get_permissions()
+
+    def get_object(self):
+        return BusinessSettings.get_solo()
