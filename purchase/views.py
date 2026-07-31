@@ -17,12 +17,12 @@ from rest_framework.exceptions import ValidationError as serializers_ValidationE
 
 from django.db import transaction
 from djangorestframework_camel_case.render import CamelCaseJSONRenderer
-from djangorestframework_camel_case.parser import CamelCaseJSONParser
+from djangorestframework_camel_case.parser import CamelCaseJSONParser, CamelCaseMultiPartParser, CamelCaseFormParser
 from decimal import Decimal
 
 class PurchaseCamelCaseMixin:
     renderer_classes = [CamelCaseJSONRenderer]
-    parser_classes = [CamelCaseJSONParser]
+    parser_classes = [CamelCaseJSONParser, CamelCaseMultiPartParser, CamelCaseFormParser]
 
 from erp_backend.permissions import IsPurchaseUser, OnlyAdminCanDelete
 from purchase.models import Expense, PurchaseInvoice, PurchaseItem, Vendor, VendorPayment

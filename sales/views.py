@@ -17,7 +17,7 @@ from rest_framework.response import Response
 from rest_framework import status as drf_status
 
 from erp_backend.permissions import IsSalesUser, OnlyAdminCanDelete
-from sales.models import Customer, PaymentReceived, SalesInvoice, SalesItem
+from sales.models import Customer, PaymentReceived, SalesInvoice, SalesItem, Quotation, QuotationItem
 from sales.pagination import CustomPageNumberPagination
 from sales.serializers import (
     CustomerListSerializer,
@@ -26,6 +26,8 @@ from sales.serializers import (
     SalesInvoiceListSerializer,
     SalesInvoiceSerializer,
     SalesItemSerializer,
+    QuotationListSerializer,
+    QuotationDetailSerializer,
 )
 
 SALES_PERMISSION_NOTE = (
@@ -738,3 +740,109 @@ class PaymentReceivedViewSet(viewsets.ModelViewSet):
             payment.restore()
             
         return Response({"message": "Payment restored, balances re-applied."})
+
+
+class QuotationViewSet(viewsets.ModelViewSet):
+    """
+    API endpoint for managing sales quotations.
+    """
+    permission_classes = [IsSalesUser, OnlyAdminCanDelete]
+    pagination_class = CustomPageNumberPagination
+
+    def get_queryset(self):
+        # We compute effective_status on read and use annotations if needed for filtering, 
+        # or we just filter using python logic if needed, but normally we just query DB.
+        queryset = Quotation.all_objects.all() if self.request.user.is_superuser else Quotation.objects.all()
+        
+        status = self.request.query_params.get('status')
+        if status:
+            queryset = queryset.filter(status=status)
+            
+        return queryset.order_by('-date', '-id')
+
+    def get_serializer_class(self):
+        if self.action == 'list':
+            from sales.serializers import QuotationListSerializer
+            return QuotationListSerializer
+        from sales.serializers import QuotationDetailSerializer
+        return QuotationDetailSerializer
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        if instance.status == 'converted':
+            return Response(
+                {"detail": "Converted quotations cannot be deleted."}, 
+                status=drf_status.HTTP_400_BAD_REQUEST
+            )
+        return super().destroy(request, *args, **kwargs)
+
+    def update(self, request, *args, **kwargs):
+        instance = self.get_object()
+        if instance.status == 'converted':
+            return Response(
+                {"detail": "Converted quotations cannot be edited."},
+                status=drf_status.HTTP_400_BAD_REQUEST
+            )
+        return super().update(request, *args, **kwargs)
+
+    @action(detail=True, methods=['post'])
+    def convert(self, request, pk=None):
+        from django.utils import timezone
+        
+        # We start atomic and then select_for_update to prevent double conversion
+        with transaction.atomic():
+            # Use select_for_update to lock the row and prevent race conditions
+            quotation = Quotation.objects.select_for_update().filter(pk=pk).first()
+            if not quotation:
+                return Response({"detail": "Not found."}, status=404)
+            
+            if quotation.status == 'converted':
+                return Response(
+                    {"detail": "Quotation is already converted."}, 
+                    status=drf_status.HTTP_400_BAD_REQUEST
+                )
+                
+            if quotation.is_expired:
+                return Response(
+                    {"detail": "This quotation has expired and cannot be converted."}, 
+                    status=drf_status.HTTP_400_BAD_REQUEST
+                )
+
+            # Look up or create the customer for the invoice
+            from sales.utils import get_or_create_customer_from_data
+            customer = get_or_create_customer_from_data(quotation.customer_data)
+            
+            # Map Quotation fields to SalesInvoice fields exactly
+            invoice = SalesInvoice.objects.create(
+                customer=customer,
+                date=timezone.localdate(),
+                payment_term=quotation.payment_term,
+                # Explicit Mappings:
+                invoice_discount=quotation.discount_percentage,
+                vat_percentage=quotation.vat_percentage,
+                status='Draft'  # Draft status as safety
+            )
+            
+            for q_item in quotation.items.all():
+                SalesItem.objects.create(
+                    invoice=invoice,
+                    item_name=q_item.item_name,
+                    rate=q_item.rate,
+                    # Explicit Mappings:
+                    units=q_item.unit,
+                    quantity=q_item.qty,
+                    discount=q_item.discount
+                )
+                
+            quotation.status = 'converted'
+            quotation.converted_invoice = invoice
+            quotation.save(update_fields=['status', 'converted_invoice', 'updated_at'])
+            
+            from sales.serializers import QuotationDetailSerializer, SalesInvoiceSerializer
+            
+            # Return both records
+            return Response({
+                "detail": "Quotation successfully converted to invoice.",
+                "quotation": QuotationDetailSerializer(quotation).data,
+                "invoice": SalesInvoiceSerializer(invoice).data
+            }, status=drf_status.HTTP_201_CREATED)

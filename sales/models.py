@@ -249,3 +249,148 @@ class PaymentReceived(SoftDeleteModel):
 
     def __str__(self) -> str:
         return f"{self.receipt_number} — {self.customer}"
+
+
+class Quotation(SoftDeleteModel):
+    """Sales Quotation header."""
+    
+    quotation_number = models.CharField(max_length=50, unique=True, blank=True)
+    customer_data = models.JSONField(help_text="Stored exactly as received (customer_name, phone, etc.)")
+    date = models.DateField(default=timezone.localdate)
+    valid_days = models.PositiveIntegerField(null=True, blank=True)
+    valid_until = models.DateField(null=True, blank=True)
+    
+    PAYMENT_TERM_CHOICES = (
+        ('cash', 'Cash'),
+        ('credit', 'Credit'),
+    )
+    payment_term = models.CharField(max_length=10, choices=PAYMENT_TERM_CHOICES, default='cash')
+    
+    discount_percentage = models.DecimalField(max_digits=5, decimal_places=2, default=0.0)
+    vat_percentage = models.DecimalField(max_digits=5, decimal_places=2, default=0.0)
+    
+    STATUS_CHOICES = (
+        ('draft', 'Draft'),
+        ('sent', 'Sent'),
+        ('accepted', 'Accepted'),
+        ('rejected', 'Rejected'),
+        ('converted', 'Converted'),
+    )
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='draft')
+    
+    converted_invoice = models.ForeignKey(
+        'SalesInvoice', on_delete=models.SET_NULL, null=True, blank=True, related_name='quotations'
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-date", "-id"]
+
+    @property
+    def subtotal(self):
+        return sum((item.line_total for item in self.items.all()), Decimal('0.00'))
+
+    @property
+    def discount_amount(self):
+        return self.subtotal * (Decimal(str(self.discount_percentage)) / Decimal('100'))
+
+    @property
+    def vat_amount(self):
+        return (self.subtotal - self.discount_amount) * (Decimal(str(self.vat_percentage)) / Decimal('100'))
+
+    @property
+    def total(self):
+        return self.subtotal - self.discount_amount + self.vat_amount
+        
+    @property
+    def is_expired(self):
+        if self.valid_until and self.valid_until < timezone.localdate() and self.status not in ['converted', 'rejected']:
+            return True
+        return False
+
+    @property
+    def validity_display(self):
+        if self.valid_until is None:
+            return "No Expiry"
+        if self.is_expired:
+            return "Expired"
+        today = timezone.localdate()
+        if self.valid_until == today:
+            return "Expires today"
+        if self.valid_until and self.valid_until > today:
+            days = (self.valid_until - today).days
+            return f"{days} days left"
+        return ""
+
+    @property
+    def effective_status(self):
+        if self.is_expired:
+            return "expired"
+        return self.status
+
+    def save(self, *args, **kwargs):
+        if self.valid_days is not None and self.date:
+            from datetime import timedelta
+            self.valid_until = self.date + timedelta(days=self.valid_days)
+        else:
+            self.valid_until = None
+            
+        if not self.quotation_number:
+            from datetime import date
+            current_year = date.today().year
+            prefix = f'QT-{current_year}-'
+            
+            max_attempts = 5
+            for attempt in range(max_attempts):
+                with transaction.atomic():
+                    last = Quotation.all_objects.filter(
+                        quotation_number__startswith=prefix
+                    ).order_by('-id').first()
+                    
+                    if last:
+                        last_number = int(last.quotation_number.split('-')[-1])
+                        new_number = last_number + 1
+                    else:
+                        new_number = 1
+                        
+                    self.quotation_number = f'{prefix}{new_number:05d}'
+                    
+                    try:
+                        with transaction.atomic():
+                            super().save(*args, **kwargs)
+                        break
+                    except IntegrityError as e:
+                        if 'quotation_number' in str(e) and attempt < max_attempts - 1:
+                            continue
+                        raise
+        else:
+            super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        return self.quotation_number
+
+
+class QuotationItem(models.Model):
+    """Line item belonging to a quotation."""
+
+    quotation = models.ForeignKey(
+        Quotation,
+        on_delete=models.CASCADE,
+        related_name="items",
+    )
+    item_name = models.CharField(max_length=255)
+    unit = models.CharField(max_length=50, default='pcs')
+    qty = models.DecimalField(max_digits=10, decimal_places=2)
+    rate = models.DecimalField(max_digits=12, decimal_places=2)
+    discount = models.DecimalField(max_digits=12, decimal_places=2, default=0.0, help_text="Discount percentage (0-100)")
+
+    class Meta:
+        ordering = ["id"]
+
+    @property
+    def line_total(self):
+        return (self.qty * self.rate) - ((self.qty * self.rate) * (self.discount / Decimal('100')))
+
+    def __str__(self) -> str:
+        return f"{self.item_name} x{self.qty}"

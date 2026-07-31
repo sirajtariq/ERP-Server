@@ -12,7 +12,7 @@ from django.db.models import Sum
 from rest_framework import serializers
 from rest_framework.validators import UniqueValidator
 
-from sales.models import Customer, PaymentReceived, SalesInvoice, SalesItem
+from sales.models import Customer, PaymentReceived, SalesInvoice, SalesItem, Quotation, QuotationItem
 
 
 class CustomerListSerializer(serializers.ModelSerializer):
@@ -440,7 +440,8 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
 
         if isinstance(customer_data, dict) and customer_data.get('is_new_customer'):
             customer_data.pop('is_new_customer', None)
-            customer = Customer.objects.create(**customer_data)
+            from sales.utils import get_or_create_customer_from_data
+            customer = get_or_create_customer_from_data(customer_data)
         else:
             customer = customer_data
 
@@ -465,7 +466,8 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         if customer_data is not None:
             if isinstance(customer_data, dict) and customer_data.get('is_new_customer'):
                 customer_data.pop('is_new_customer', None)
-                customer = Customer.objects.create(**customer_data)
+                from sales.utils import get_or_create_customer_from_data
+                customer = get_or_create_customer_from_data(customer_data)
             else:
                 customer = customer_data
             instance.customer = customer
@@ -639,3 +641,94 @@ class PaymentReceivedSerializer(serializers.ModelSerializer):
 
             return super().update(instance, validated_data)
 
+
+class QuotationItemNestedSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = QuotationItem
+        fields = [
+            'id',
+            'item_name',
+            'unit',
+            'qty',
+            'rate',
+            'discount',
+            'line_total',
+        ]
+        read_only_fields = ['id', 'line_total']
+
+
+class QuotationListSerializer(serializers.ModelSerializer):
+    effective_status = serializers.ReadOnlyField()
+    validity_display = serializers.ReadOnlyField()
+
+    class Meta:
+        model = Quotation
+        fields = [
+            'id',
+            'quotation_number',
+            'customer_data',
+            'total',
+            'valid_days',
+            'validity_display',
+            'status',
+            'effective_status',
+            'date',
+        ]
+        read_only_fields = fields
+
+
+class QuotationDetailSerializer(serializers.ModelSerializer):
+    items = QuotationItemNestedSerializer(many=True)
+    effective_status = serializers.ReadOnlyField()
+    validity_display = serializers.ReadOnlyField()
+
+    class Meta:
+        model = Quotation
+        fields = [
+            'id',
+            'quotation_number',
+            'customer_data',
+            'date',
+            'valid_days',
+            'valid_until',
+            'payment_term',
+            'discount_percentage',
+            'vat_percentage',
+            'subtotal',
+            'discount_amount',
+            'vat_amount',
+            'total',
+            'status',
+            'effective_status',
+            'validity_display',
+            'converted_invoice',
+            'items',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = [
+            'id', 'quotation_number', 'valid_until', 'subtotal',
+            'discount_amount', 'vat_amount', 'total', 'effective_status',
+            'validity_display', 'converted_invoice', 'created_at', 'updated_at'
+        ]
+
+    def create(self, validated_data: dict) -> Quotation:
+        items_data = validated_data.pop("items", [])
+        quotation = Quotation.objects.create(**validated_data)
+        for item_data in items_data:
+            QuotationItem.objects.create(quotation=quotation, **item_data)
+        return quotation
+
+    def update(self, instance: Quotation, validated_data: dict) -> Quotation:
+        items_data = validated_data.pop("items", None)
+        
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+
+        if items_data is not None:
+            instance.items.all().delete()
+            for item_data in items_data:
+                QuotationItem.objects.create(quotation=instance, **item_data)
+
+        return instance
