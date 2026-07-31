@@ -90,6 +90,43 @@ class UserSerializer(serializers.ModelSerializer):
             pass
         return user
 
+    def update(self, instance, validated_data):
+        role_name = validated_data.pop('role', None)
+        
+        profile_fields = [
+            'fullname', 'phone', 'cnic', 'address', 'designation',
+            'dateofjoining', 'employmenttype', 'basicsalary', 'salarytype'
+        ]
+        
+        profile_data = {}
+        for field in profile_fields:
+            if field in validated_data:
+                profile_data[field] = validated_data.pop(field)
+
+        for attr, value in validated_data.items():
+            if attr == 'password':
+                instance.set_password(value)
+            else:
+                setattr(instance, attr, value)
+        instance.save()
+
+        if profile_data:
+            from .models import UserProfile
+            profile, created = UserProfile.objects.get_or_create(user=instance)
+            for attr, value in profile_data.items():
+                setattr(profile, attr, value)
+            profile.save()
+
+        if role_name:
+            instance.groups.clear()
+            try:
+                group = Group.objects.get(name=role_name)
+                instance.groups.add(group)
+            except Group.DoesNotExist:
+                pass
+
+        return instance
+
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
 # Mapping from Django group names / superuser flag to API role constants
