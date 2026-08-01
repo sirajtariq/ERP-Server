@@ -175,9 +175,17 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
     def validate(self, attrs):
         data = super().validate(attrs)
 
-        # Add role to the response body alongside access/refresh tokens
+        # Add role and username (kept for backwards compatibility if needed)
         data["role"] = self._resolve_role(self.user)
         data["username"] = self.user.username
+
+        # Add full user info
+        data["user"] = UserMeSerializer(self.user, context=self.context).data
+
+        # Add full company details
+        from .models import BusinessSettings
+        company = BusinessSettings.get_solo()
+        data["company"] = BusinessSettingsSerializer(company, context=self.context).data
 
         return data
 
