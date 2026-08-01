@@ -334,11 +334,14 @@ class CustomerViewSet(viewsets.ModelViewSet):
             "customerType": customer.customer_type,
         }
 
+        customer_invoices = list(customer.invoices.filter(status="Saved").values("id", "invoice_number"))
+
         return Response({
             "customer": customer_info,
             "summary": summary,
             "ledger": ledger_rows,
             "finalPaymentDetails": final_payment_details,
+            "invoices": customer_invoices,
         })
 
     @action(detail=True, methods=['post'], url_path='convert-to-permanent')
