@@ -176,8 +176,8 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         data = super().validate(attrs)
 
         # Add role and username (kept for backwards compatibility if needed)
-        data["role"] = self._resolve_role(self.user)
-        data["username"] = self.user.username
+        # data["role"] = self._resolve_role(self.user)
+        # data["username"] = self.user.username
 
         # Add full user info
         data["user"] = UserMeSerializer(self.user, context=self.context).data
