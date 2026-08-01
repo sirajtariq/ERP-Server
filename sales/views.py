@@ -338,10 +338,10 @@ class CustomerViewSet(viewsets.ModelViewSet):
 
         return Response({
             "customer": customer_info,
+            "invoices": customer_invoices,
             "summary": summary,
             "ledger": ledger_rows,
             "finalPaymentDetails": final_payment_details,
-            "invoices": customer_invoices,
         })
 
     @action(detail=True, methods=['post'], url_path='convert-to-permanent')

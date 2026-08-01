@@ -369,8 +369,11 @@ class VendorViewSet(PurchaseCamelCaseMixin, viewsets.ModelViewSet):
             "phone": vendor.phone,
         }
 
+        vendor_invoices = list(vendor.invoices.filter(status="Saved").values("id", "invoice_number"))
+
         return Response({
             "vendor": vendor_info,
+            "invoices": vendor_invoices,
             "summary": summary,
             "ledger": ledger_rows,
             "finalPaymentDetails": final_payment_details,
