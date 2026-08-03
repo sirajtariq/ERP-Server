@@ -12,7 +12,7 @@ from django.db.models import Sum
 from rest_framework import serializers
 from rest_framework.validators import UniqueValidator
 
-from sales.models import Customer, PaymentReceived, SalesInvoice, SalesItem, Quotation, QuotationItem
+from sales.models import Customer, PaymentReceived, SalesInvoice, SalesItem, Quotation, QuotationItem, SalesReturn, SalesReturnItem
 
 
 class CustomerListSerializer(serializers.ModelSerializer):
@@ -729,5 +729,283 @@ class QuotationDetailSerializer(serializers.ModelSerializer):
             instance.items.all().delete()
             for item_data in items_data:
                 QuotationItem.objects.create(quotation=instance, **item_data)
+
+        return instance
+
+
+class SalesReturnItemNestedSerializer(serializers.ModelSerializer):
+    """Nested line item serializer for sales returns."""
+    total = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+
+    class Meta:
+        model = SalesReturnItem
+        fields = ['id', 'sales_item', 'item_name', 'quantity', 'rate', 'discount', 'total']
+        read_only_fields = ['id', 'total']
+
+
+class SalesReturnListSerializer(serializers.ModelSerializer):
+    """Lightweight serializer for sales return list views."""
+
+    returnNumber = serializers.CharField(source='return_number', read_only=True)
+    customerName = serializers.SerializerMethodField()
+    invoiceNumber = serializers.CharField(source='invoice.invoice_number', read_only=True)
+    netReturnAmount = serializers.DecimalField(
+        source='net_return_amount', max_digits=12, decimal_places=2, read_only=True
+    )
+    returnDate = serializers.DateField(source='return_date', read_only=True)
+
+    class Meta:
+        model = SalesReturn
+        fields = [
+            'id',
+            'returnNumber',
+            'customerName',
+            'invoiceNumber',
+            'netReturnAmount',
+            'status',
+            'returnDate',
+        ]
+        read_only_fields = fields
+
+    def get_customerName(self, obj):
+        return obj.customer.customer_name if obj.customer else None
+
+
+class SalesReturnSerializer(serializers.ModelSerializer):
+    """Full detail serializer for sales return / credit note CRUD."""
+
+    items = SalesReturnItemNestedSerializer(many=True)
+    customerName = serializers.CharField(source='customer.customer_name', read_only=True)
+    invoiceNumber = serializers.CharField(source='invoice.invoice_number', read_only=True)
+    net_return_amount = serializers.DecimalField(
+        max_digits=12, decimal_places=2, read_only=True
+    )
+
+    class Meta:
+        model = SalesReturn
+        fields = [
+            'id',
+            'return_number',
+            'invoice',
+            'customer',
+            'customerName',
+            'invoiceNumber',
+            'status',
+            'refund_type',
+            'return_date',
+            'reason',
+            'notes',
+            'items',
+            'net_return_amount',
+            'applied_to_credit',
+            'applied_to_advance',
+            'created_at',
+        ]
+        read_only_fields = [
+            'id',
+            'return_number',
+            'customer',
+            'customerName',
+            'invoiceNumber',
+            'net_return_amount',
+            'applied_to_credit',
+            'applied_to_advance',
+            'created_at',
+        ]
+
+    # ── Validation ──────────────────────────────────────────────────
+
+    def validate(self, attrs):
+        # 1. Absolute Hard Lock: Reject any modification if the return is already 'Saved'
+        if self.instance and self.instance.status == 'Saved':
+            raise serializers.ValidationError(
+                {"status": "Saved credit notes are locked and cannot be modified."}
+            )
+
+        # 2. Invoice Validation: must be Saved and not deleted
+        invoice = attrs.get('invoice', getattr(self.instance, 'invoice', None))
+        if not invoice:
+            raise serializers.ValidationError({"invoice": "An invoice is required."})
+
+        # Re-fetch to ensure we check current DB state
+        try:
+            invoice_obj = SalesInvoice.all_objects.get(pk=invoice.pk)
+        except SalesInvoice.DoesNotExist:
+            raise serializers.ValidationError({"invoice": "Invoice not found."})
+
+        if invoice_obj.status != 'Saved':
+            raise serializers.ValidationError(
+                {"invoice": "Returns can only be created against invoices with status 'Saved'."}
+            )
+        if invoice_obj.is_deleted:
+            raise serializers.ValidationError(
+                {"invoice": "Returns cannot be created against deleted invoices."}
+            )
+
+        # 3. Items validation
+        items_list = attrs.get('items')
+        if items_list is None and self.instance:
+            items_list = []
+        elif items_list is None:
+            items_list = []
+
+        if len(items_list) == 0:
+            raise serializers.ValidationError(
+                {"items": "A sales return must contain at least one item."}
+            )
+
+        # 4. Quantity Cap Validation
+        for item_data in items_list:
+            sales_item = item_data.get('sales_item')
+            qty = Decimal(str(item_data.get('quantity', 0)))
+            rate = Decimal(str(item_data.get('rate', 0)))
+            disc = Decimal(str(item_data.get('discount', 0)))
+
+            if qty <= 0:
+                raise serializers.ValidationError(
+                    {"items": "Return quantity must be greater than zero."}
+                )
+            if rate <= 0:
+                raise serializers.ValidationError(
+                    {"items": "Return rate must be greater than zero."}
+                )
+            if disc < 0 or disc > 100:
+                raise serializers.ValidationError(
+                    {"items": "Discount percentage must be between 0 and 100."}
+                )
+
+            if sales_item:
+                # Verify the sales_item belongs to the linked invoice
+                if sales_item.invoice_id != invoice.pk:
+                    raise serializers.ValidationError(
+                        {"items": f"Item '{item_data.get('item_name', '')}' does not belong to the selected invoice."}
+                    )
+
+                # Calculate previously returned quantity for this specific sales_item
+                prev_returned_qs = SalesReturnItem.objects.filter(
+                    sales_item=sales_item,
+                    sales_return__status='Saved',
+                    sales_return__is_deleted=False,
+                )
+                if self.instance:
+                    prev_returned_qs = prev_returned_qs.exclude(sales_return=self.instance)
+
+                prev_returned = prev_returned_qs.aggregate(
+                    total=Sum('quantity')
+                )['total'] or Decimal('0.00')
+
+                available = sales_item.quantity - prev_returned
+                if qty > available:
+                    raise serializers.ValidationError(
+                        {"items": f"Cannot return {qty} of '{sales_item.item_name}'. "
+                                  f"Only {available} remaining (original: {sales_item.quantity}, "
+                                  f"previously returned: {prev_returned})."}
+                    )
+
+        return attrs
+
+    # ── Balance helpers ─────────────────────────────────────────────
+
+    def _apply_return_balance_effects(self, sales_return):
+        """
+        Apply balance effects when a SalesReturn transitions to 'Saved'.
+
+        STORE_CREDIT: Reduces credit_balance first, remainder goes to advance_balance.
+        CASH: No customer balance changes — treated as direct cash outflow.
+
+        Must be called inside a transaction.atomic() block.
+        """
+        if sales_return.refund_type == 'CASH':
+            # Cash refund: no customer balance changes
+            sales_return.applied_to_credit = Decimal('0.00')
+            sales_return.applied_to_advance = Decimal('0.00')
+            sales_return.save(update_fields=['applied_to_credit', 'applied_to_advance'])
+            return
+
+        customer = Customer.objects.select_for_update().get(pk=sales_return.customer_id)
+        net_amount = sales_return.net_return_amount
+        remaining = net_amount
+
+        applied_to_credit = Decimal('0.00')
+        applied_to_advance = Decimal('0.00')
+
+        # Step 1: Reduce credit_balance (down to minimum of 0)
+        if customer.credit_balance > 0 and remaining > 0:
+            applied_to_credit = min(customer.credit_balance, remaining)
+            customer.credit_balance -= applied_to_credit
+            remaining -= applied_to_credit
+
+        # Step 2: Any remainder goes to advance_balance
+        if remaining > 0:
+            applied_to_advance = remaining
+            customer.advance_balance += applied_to_advance
+
+        customer.save(update_fields=['credit_balance', 'advance_balance'])
+
+        # Store the split for precise reversal
+        sales_return.applied_to_credit = applied_to_credit
+        sales_return.applied_to_advance = applied_to_advance
+        sales_return.save(update_fields=['applied_to_credit', 'applied_to_advance'])
+
+    def _reverse_return_balance_effects(self, sales_return):
+        """
+        Reverse balance effects using the STORED split amounts.
+
+        STORE_CREDIT: Reverses credit/advance adjustments.
+        CASH: No-op (no balances were modified).
+
+        Must be called inside a transaction.atomic() block.
+        """
+        if sales_return.refund_type == 'CASH':
+            return
+
+        customer = Customer.objects.select_for_update().get(pk=sales_return.customer_id)
+
+        if sales_return.applied_to_advance > 0:
+            customer.advance_balance -= sales_return.applied_to_advance
+
+        if sales_return.applied_to_credit > 0:
+            customer.credit_balance += sales_return.applied_to_credit
+
+        customer.save(update_fields=['credit_balance', 'advance_balance'])
+
+    # ── Create / Update ─────────────────────────────────────────────
+
+    def create(self, validated_data: dict) -> SalesReturn:
+        items_data = validated_data.pop('items')
+        invoice = validated_data['invoice']
+
+        # Auto-set customer from invoice
+        validated_data['customer'] = invoice.customer
+
+        with transaction.atomic():
+            sales_return = SalesReturn.objects.create(**validated_data)
+
+            for item_data in items_data:
+                SalesReturnItem.objects.create(sales_return=sales_return, **item_data)
+
+            if sales_return.status == 'Saved':
+                sales_return.refresh_from_db()
+                self._apply_return_balance_effects(sales_return)
+
+        return sales_return
+
+    def update(self, instance: SalesReturn, validated_data: dict) -> SalesReturn:
+        items_data = validated_data.pop('items', None)
+        old_status = instance.status
+
+        with transaction.atomic():
+            for attr, value in validated_data.items():
+                setattr(instance, attr, value)
+            instance.save()
+
+            if items_data is not None:
+                instance.items.all().delete()
+                for item_data in items_data:
+                    SalesReturnItem.objects.create(sales_return=instance, **item_data)
+
+            if old_status != 'Saved' and instance.status == 'Saved':
+                instance.refresh_from_db()
+                self._apply_return_balance_effects(instance)
 
         return instance
