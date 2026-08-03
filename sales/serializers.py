@@ -18,7 +18,7 @@ from sales.models import Customer, PaymentReceived, SalesInvoice, SalesItem, Quo
 class CustomerListSerializer(serializers.ModelSerializer):
     """Lightweight serializer for customer list views (no nested invoices)."""
 
-    customerId = serializers.IntegerField(source="customer_id", read_only=True)
+    customerId = serializers.CharField(source="customer_id", read_only=True)
     customerName = serializers.CharField(source="customer_name", read_only=True)
     customerType = serializers.CharField(source="customer_type", read_only=True)
     Phone = serializers.CharField(source="phone", read_only=True)
@@ -75,7 +75,7 @@ class CustomerInvoiceNestedSerializer(serializers.ModelSerializer):
 class CustomerSerializer(serializers.ModelSerializer):
     """Serializer for customer master data with nested invoices."""
     
-    customerId = serializers.IntegerField(source="customer_id", read_only=True)
+    customerId = serializers.CharField(source="customer_id", read_only=True)
     customerName = serializers.CharField(source="customer_name")
     customerType = serializers.ChoiceField(source="customer_type",choices=['permanent', 'walkin'],required=True)
     Phone = serializers.CharField(source="phone",required=True, validators=[UniqueValidator(queryset=Customer.objects.all(),message="Customer with this phone number already exists.")],)
@@ -492,8 +492,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
 class PaymentReceivedSerializer(serializers.ModelSerializer):
     """Serializer for daily income / payment received records."""
 
-    customer = serializers.SlugRelatedField(
-        slug_field='customer_id',
+    customer = serializers.PrimaryKeyRelatedField(
         queryset=Customer.objects.all()
     )
     customerName = serializers.CharField(

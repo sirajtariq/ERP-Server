@@ -108,7 +108,7 @@ class Command(BaseCommand):
             tax_amt = (subtotal * (vat_perc / Decimal('100'))).quantize(Decimal('0.01'))
             inv_disc = Decimal('0.00')
             if random.random() > 0.8:
-                inv_disc = Decimal(str(random.randint(1, 10) * 100))
+                inv_disc = Decimal(str(random.randint(1, 15)))
                 
             net_total = subtotal + tax_amt - inv_disc
             if net_total < 0:
@@ -143,7 +143,7 @@ class Command(BaseCommand):
 
             data = {
                 "vendor": {
-                    "vendor_id": vendor.vendor_id,
+                    "id": vendor.id,
                     "vendor_name": vendor.vendor_name,
                     "phone": vendor.phone or "",
                 },
@@ -198,7 +198,7 @@ class Command(BaseCommand):
             
             data = {
                 "vendor": {
-                    "vendor_id": vendor.vendor_id,
+                    "id": vendor.id,
                     "vendor_name": vendor.vendor_name,
                     "phone": vendor.phone or "",
                 },

@@ -65,10 +65,13 @@ class CustomerViewSet(viewsets.ModelViewSet):
         
         name = self.request.query_params.get("name")
         customer_type = self.request.query_params.get("type")
+        customer_id = self.request.query_params.get("customer_id")
         if name:
             qs = qs.filter(customer_name__icontains=name)
         if customer_type:
             qs = qs.filter(customer_type=customer_type)
+        if customer_id:
+            qs = qs.filter(customer_id__icontains=customer_id)
         return qs
 
     @swagger_auto_schema(
@@ -98,6 +101,11 @@ class CustomerViewSet(viewsets.ModelViewSet):
             openapi.Parameter(
                 "type", openapi.IN_QUERY,
                 description="Filter by customer type: 'permanent' or 'walkin'",
+                type=openapi.TYPE_STRING,
+            ),
+            openapi.Parameter(
+                "customer_id", openapi.IN_QUERY,
+                description="Search customers by customer_id (e.g. PR-00000, partial match)",
                 type=openapi.TYPE_STRING,
             ),
         ],

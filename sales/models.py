@@ -16,7 +16,7 @@ class Customer(SoftDeleteModel):
         ('walkin', 'Walk-in'),
     )
 
-    customer_id = models.IntegerField(unique=True, editable=False, default=4000)
+    customer_id = models.CharField(max_length=20, unique=True, editable=False, blank=True)
     customer_name = models.CharField(max_length=255)
     customer_type = models.CharField(max_length=10, choices=CUSTOMER_TYPE_CHOICES)
     phone = models.CharField(max_length=20, unique=True, blank=True, null=True)
@@ -43,19 +43,25 @@ class Customer(SoftDeleteModel):
             for attempt in range(max_attempts):
                 with transaction.atomic():
                     if self.customer_type == 'walkin':
-                        start_id = 8000
-                        # FIX: Use all_objects instead of objects to see soft-deleted records
                         last = Customer.all_objects.filter(
                             customer_type='walkin'
                         ).order_by('-customer_id').first()
+                        if last and getattr(last, 'customer_id', '').startswith('WI-'):
+                            last_number = int(last.customer_id.split('-')[1])
+                            new_id = f"WI-{last_number + 1:05d}"
+                        else:
+                            new_id = "WI-00001"
                     else:
-                        start_id = 4000
-                        # FIX: Use all_objects instead of objects to see soft-deleted records
                         last = Customer.all_objects.filter(
                             customer_type='permanent'
                         ).order_by('-customer_id').first()
+                        if last and getattr(last, 'customer_id', '').startswith('PR-'):
+                            last_number = int(last.customer_id.split('-')[1])
+                            new_id = f"PR-{last_number + 1:05d}"
+                        else:
+                            new_id = "PR-00001"
 
-                    self.customer_id = (last.customer_id + 1) if last else start_id
+                    self.customer_id = new_id
 
                     try:
                         with transaction.atomic():

@@ -18,7 +18,7 @@ VENDOR_ID_START = 5000
 class Vendor(SoftDeleteModel):
     """Supplier / vendor master record."""
 
-    vendor_id = models.IntegerField(unique=True, editable=False, default=VENDOR_ID_START)
+    vendor_id = models.CharField(max_length=20, unique=True, editable=False, blank=True)
     vendor_name = models.CharField(max_length=255)
     # phone is null=True so multiple vendors with no phone store NULL
     # instead of '' — NULLs are exempt from unique constraints in SQL,
@@ -60,7 +60,12 @@ class Vendor(SoftDeleteModel):
                         .order_by('-vendor_id')
                         .first()
                     )
-                    self.vendor_id = (last.vendor_id + 1) if last else VENDOR_ID_START
+                    if last and getattr(last, 'vendor_id', '').startswith('VN-'):
+                        last_number = int(last.vendor_id.split('-')[1])
+                        new_id = f"VN-{last_number + 1:05d}"
+                    else:
+                        new_id = "VN-00001"
+                    self.vendor_id = new_id
 
                     try:
                         with transaction.atomic():
