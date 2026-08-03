@@ -115,25 +115,25 @@ class SalesInvoice(SoftDeleteModel):
 
     @property
     def subtotal(self):
-        return sum((item.total for item in self.items.all()), Decimal('0.00'))
+        return sum((item.total for item in self.items.all()), Decimal('0.00')).quantize(Decimal('0.01'))
 
     @property
     def total_line_discount(self):
-        return sum(((item.quantity * item.rate) * (item.discount / Decimal('100')) for item in self.items.all()), Decimal('0.00'))
+        return sum(((item.quantity * item.rate) * (item.discount / Decimal('100')) for item in self.items.all()), Decimal('0.00')).quantize(Decimal('0.01'))
 
     @property
     def tax_amount(self):
         deducted_invoice_discount = self.subtotal * (Decimal(str(self.invoice_discount)) / Decimal('100'))
-        return (self.subtotal - deducted_invoice_discount) * (Decimal(str(self.vat_percentage)) / Decimal('100'))
+        return ((self.subtotal - deducted_invoice_discount) * (Decimal(str(self.vat_percentage)) / Decimal('100'))).quantize(Decimal('0.01'))
 
     @property
     def net_total(self):
         deducted_invoice_discount = self.subtotal * (Decimal(str(self.invoice_discount)) / Decimal('100'))
-        return (self.subtotal - deducted_invoice_discount) + self.tax_amount
+        return ((self.subtotal - deducted_invoice_discount) + self.tax_amount).quantize(Decimal('0.01'))
 
     @property
     def balance_due(self):
-        return self.net_total - Decimal(str(self.paid_amount))
+        return (self.net_total - Decimal(str(self.paid_amount))).quantize(Decimal('0.01'))
 
     def save(self, *args, **kwargs):
         if not self.invoice_number:
@@ -189,7 +189,7 @@ class SalesItem(models.Model):
 
     @property
     def total(self):
-        return (self.quantity * self.rate) - ((self.quantity * self.rate) * (self.discount / Decimal('100')))
+        return ((self.quantity * self.rate) - ((self.quantity * self.rate) * (self.discount / Decimal('100')))).quantize(Decimal('0.01'))
 
     def __str__(self) -> str:
         return f"{self.item_name} x{self.quantity}"
@@ -295,19 +295,19 @@ class Quotation(SoftDeleteModel):
 
     @property
     def subtotal(self):
-        return sum((item.line_total for item in self.items.all()), Decimal('0.00'))
+        return sum((item.line_total for item in self.items.all()), Decimal('0.00')).quantize(Decimal('0.01'))
 
     @property
     def discount_amount(self):
-        return self.subtotal * (Decimal(str(self.discount_percentage)) / Decimal('100'))
+        return (self.subtotal * (Decimal(str(self.discount_percentage)) / Decimal('100'))).quantize(Decimal('0.01'))
 
     @property
     def vat_amount(self):
-        return (self.subtotal - self.discount_amount) * (Decimal(str(self.vat_percentage)) / Decimal('100'))
+        return ((self.subtotal - self.discount_amount) * (Decimal(str(self.vat_percentage)) / Decimal('100'))).quantize(Decimal('0.01'))
 
     @property
     def total(self):
-        return self.subtotal - self.discount_amount + self.vat_amount
+        return (self.subtotal - self.discount_amount + self.vat_amount).quantize(Decimal('0.01'))
         
     @property
     def is_expired(self):
@@ -440,7 +440,7 @@ class SalesReturn(SoftDeleteModel):
 
     @property
     def net_return_amount(self):
-        return sum((item.total for item in self.items.all()), Decimal('0.00'))
+        return sum((item.total for item in self.items.all()), Decimal('0.00')).quantize(Decimal('0.01'))
 
     def save(self, *args, **kwargs):
         if not self.return_number:
@@ -506,9 +506,9 @@ class SalesReturnItem(SoftDeleteModel):
 
     @property
     def total(self):
-        return (self.quantity * self.rate) - (
+        return ((self.quantity * self.rate) - (
             (self.quantity * self.rate) * (self.discount / Decimal('100'))
-        )
+        )).quantize(Decimal('0.01'))
 
     def __str__(self) -> str:
         return f"{self.item_name} x{self.quantity}"
