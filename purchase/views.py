@@ -72,8 +72,11 @@ class VendorViewSet(PurchaseCamelCaseMixin, viewsets.ModelViewSet):
             )
 
         name = self.request.query_params.get("name")
+        vendor_id = self.request.query_params.get("vendor_id")
         if name:
             qs = qs.filter(vendor_name__icontains=name)
+        if vendor_id:
+            qs = qs.filter(vendor_id__icontains=vendor_id)
         return qs
 
     def get_serializer_class(self):
@@ -105,6 +108,11 @@ class VendorViewSet(PurchaseCamelCaseMixin, viewsets.ModelViewSet):
                 "ordering", openapi.IN_QUERY,
                 description="Sort field. Prefix with '-' for descending. "
                             "E.g. 'vendor_name', '-created_at', 'payable_balance'",
+                type=openapi.TYPE_STRING,
+            ),
+            openapi.Parameter(
+                "vendor_id", openapi.IN_QUERY,
+                description="Search vendors by vendor_id (e.g. VN-00000, partial match)",
                 type=openapi.TYPE_STRING,
             ),
         ],

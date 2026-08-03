@@ -17,7 +17,7 @@ from rest_framework.response import Response
 from rest_framework import status as drf_status
 
 from erp_backend.permissions import IsSalesUser, OnlyAdminCanDelete
-from sales.models import Customer, PaymentReceived, SalesInvoice, SalesItem, Quotation, QuotationItem
+from sales.models import Customer, PaymentReceived, SalesInvoice, SalesItem, Quotation, QuotationItem, SalesReturn, SalesReturnItem
 from sales.pagination import CustomPageNumberPagination
 from sales.serializers import (
     CustomerListSerializer,
@@ -28,6 +28,8 @@ from sales.serializers import (
     SalesItemSerializer,
     QuotationListSerializer,
     QuotationDetailSerializer,
+    SalesReturnListSerializer,
+    SalesReturnSerializer,
 )
 
 SALES_PERMISSION_NOTE = (
@@ -65,10 +67,13 @@ class CustomerViewSet(viewsets.ModelViewSet):
         
         name = self.request.query_params.get("name")
         customer_type = self.request.query_params.get("type")
+        customer_id = self.request.query_params.get("customer_id")
         if name:
             qs = qs.filter(customer_name__icontains=name)
         if customer_type:
             qs = qs.filter(customer_type=customer_type)
+        if customer_id:
+            qs = qs.filter(customer_id__icontains=customer_id)
         return qs
 
     @swagger_auto_schema(
@@ -98,6 +103,11 @@ class CustomerViewSet(viewsets.ModelViewSet):
             openapi.Parameter(
                 "type", openapi.IN_QUERY,
                 description="Filter by customer type: 'permanent' or 'walkin'",
+                type=openapi.TYPE_STRING,
+            ),
+            openapi.Parameter(
+                "customer_id", openapi.IN_QUERY,
+                description="Search customers by customer_id (e.g. PR-00000, partial match)",
                 type=openapi.TYPE_STRING,
             ),
         ],
@@ -229,6 +239,19 @@ class CustomerViewSet(viewsets.ModelViewSet):
 
         ledger_rows = []
 
+        # ── Sales Returns / Credit Notes ────────────────────────────
+        if from_date and to_date:
+            sales_returns = customer.returns.filter(
+                status='Saved', return_date__range=[from_date, to_date]
+            ).order_by('return_date', 'id')
+        else:
+            sales_returns = customer.returns.filter(
+                status='Saved'
+            ).order_by('return_date', 'id')
+
+        all_returns = list(sales_returns.prefetch_related('items'))
+        total_returns = sum((Decimal(str(r.net_return_amount)) for r in all_returns), Decimal('0.00'))
+
         if opening_credit != Decimal('0.00'):
             opening_date = customer.created_at.date() if customer.created_at else None
             ledger_rows.append({
@@ -281,6 +304,20 @@ class CustomerViewSet(viewsets.ModelViewSet):
                 "credit": Decimal(str(pay.amount_received)),
                 "balance": Decimal('0.00'),
                 "_sort_ts": pay.created_at,
+            })
+
+        for ret in all_returns:
+            net = Decimal(str(ret.net_return_amount))
+            ledger_rows.append({
+                "date": ret.return_date.isoformat() if ret.return_date else None,
+                "voucher": ret.return_number,
+                "description": "Sales Return / Credit Note",
+                "referenceType": "sales_return",
+                "referenceId": ret.id,
+                "debit": Decimal('0.00'),
+                "credit": net,
+                "balance": Decimal('0.00'),
+                "_sort_ts": ret.created_at,
             })
 
         ledger_rows.sort(key=lambda r: r['_sort_ts'])
@@ -407,6 +444,9 @@ class SalesInvoiceViewSet(viewsets.ModelViewSet):
         invoice_number = self.request.query_params.get("invoice_number")
         customer_id = self.request.query_params.get("customer_id")
         customer_type = self.request.query_params.get("type")
+        status = self.request.query_params.get("status")
+        start_date = self.request.query_params.get("start_date")
+        end_date = self.request.query_params.get("end_date")
 
         if name:
             qs = qs.filter(customer__customer_name__icontains=name)
@@ -414,6 +454,15 @@ class SalesInvoiceViewSet(viewsets.ModelViewSet):
             qs = qs.filter(invoice_number__icontains=invoice_number)
         if customer_id:
             qs = qs.filter(customer__customer_id=customer_id)
+        if status:
+            qs = qs.filter(status=status)
+            
+        if start_date and end_date:
+            qs = qs.filter(date__range=[start_date, end_date])
+        elif start_date:
+            qs = qs.filter(date__gte=start_date)
+        elif end_date:
+            qs = qs.filter(date__lte=end_date)
 
         if customer_type == 'walkin':
             qs = qs.filter(customer__isnull=True)
@@ -453,6 +502,21 @@ class SalesInvoiceViewSet(viewsets.ModelViewSet):
                 "ordering", openapi.IN_QUERY,
                 description="Sort field. Prefix with '-' for descending. "
                             "E.g. '-date', 'invoice_number', 'paid_amount'",
+                type=openapi.TYPE_STRING,
+            ),
+            openapi.Parameter(
+                "status", openapi.IN_QUERY,
+                description="Filter by invoice status (e.g. 'Saved', 'Draft')",
+                type=openapi.TYPE_STRING,
+            ),
+            openapi.Parameter(
+                "start_date", openapi.IN_QUERY,
+                description="Start date for filtering (YYYY-MM-DD)",
+                type=openapi.TYPE_STRING,
+            ),
+            openapi.Parameter(
+                "end_date", openapi.IN_QUERY,
+                description="End date for filtering (YYYY-MM-DD)",
                 type=openapi.TYPE_STRING,
             ),
         ],
@@ -752,16 +816,84 @@ class QuotationViewSet(viewsets.ModelViewSet):
     permission_classes = [IsSalesUser, OnlyAdminCanDelete]
     pagination_class = CustomPageNumberPagination
 
+    filter_backends = [OrderingFilter]
+    ordering_fields = "__all__"
+    ordering = ["-date", "-id"]
+
     def get_queryset(self):
         # We compute effective_status on read and use annotations if needed for filtering, 
         # or we just filter using python logic if needed, but normally we just query DB.
         queryset = Quotation.all_objects.all() if self.request.user.is_superuser else Quotation.objects.all()
         
         status = self.request.query_params.get('status')
+        customer_name = self.request.query_params.get('customer_name')
+        quotation_number = self.request.query_params.get('quotation_number')
+        start_date = self.request.query_params.get('start_date')
+        end_date = self.request.query_params.get('end_date')
+
         if status:
             queryset = queryset.filter(status=status)
+        if customer_name:
+            queryset = queryset.filter(customer_data__customer_name__icontains=customer_name)
+        if quotation_number:
+            queryset = queryset.filter(quotation_number__icontains=quotation_number)
             
-        return queryset.order_by('-date', '-id')
+        if start_date and end_date:
+            queryset = queryset.filter(date__range=[start_date, end_date])
+        elif start_date:
+            queryset = queryset.filter(date__gte=start_date)
+        elif end_date:
+            queryset = queryset.filter(date__lte=end_date)
+            
+        return queryset
+
+    @swagger_auto_schema(
+        operation_description="API endpoint for managing sales quotations.",
+        manual_parameters=[
+            openapi.Parameter(
+                "customer_name", openapi.IN_QUERY,
+                description="Search quotations by customer name (case-insensitive, partial match)",
+                type=openapi.TYPE_STRING,
+            ),
+            openapi.Parameter(
+                "quotation_number", openapi.IN_QUERY,
+                description="Search quotations by quotation number (case-insensitive, partial match)",
+                type=openapi.TYPE_STRING,
+            ),
+            openapi.Parameter(
+                "status", openapi.IN_QUERY,
+                description="Filter by quotation status",
+                type=openapi.TYPE_STRING,
+            ),
+            openapi.Parameter(
+                "start_date", openapi.IN_QUERY,
+                description="Start date for filtering (YYYY-MM-DD)",
+                type=openapi.TYPE_STRING,
+            ),
+            openapi.Parameter(
+                "end_date", openapi.IN_QUERY,
+                description="End date for filtering (YYYY-MM-DD)",
+                type=openapi.TYPE_STRING,
+            ),
+            openapi.Parameter(
+                "page", openapi.IN_QUERY,
+                description="Page number (default: 1)",
+                type=openapi.TYPE_INTEGER,
+            ),
+            openapi.Parameter(
+                "page_size", openapi.IN_QUERY,
+                description="Results per page (default: 10, max: 100)",
+                type=openapi.TYPE_INTEGER,
+            ),
+            openapi.Parameter(
+                "ordering", openapi.IN_QUERY,
+                description="Sort field. Prefix with '-' for descending.",
+                type=openapi.TYPE_STRING,
+            ),
+        ],
+    )
+    def list(self, request, *args, **kwargs):
+        return super().list(request, *args, **kwargs)
 
     def get_serializer_class(self):
         if self.action == 'list':
@@ -849,3 +981,167 @@ class QuotationViewSet(viewsets.ModelViewSet):
                 "quotation": QuotationDetailSerializer(quotation).data,
                 "invoice": SalesInvoiceSerializer(invoice).data
             }, status=drf_status.HTTP_201_CREATED)
+
+
+class SalesReturnViewSet(viewsets.ModelViewSet):
+    """
+    CRUD operations for Sales Returns / Credit Notes.
+    """
+
+    queryset = SalesReturn.objects.select_related('invoice', 'customer').prefetch_related('items')
+    serializer_class = SalesReturnSerializer
+    permission_classes = [IsSalesUser, OnlyAdminCanDelete]
+    pagination_class = CustomPageNumberPagination
+    filter_backends = [OrderingFilter]
+    ordering_fields = '__all__'
+    ordering = ['-return_date', '-id']
+
+    def get_serializer_class(self):
+        if self.action == 'list':
+            return SalesReturnListSerializer
+        return SalesReturnSerializer
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        invoice_number = self.request.query_params.get('invoice_number')
+        customer_name = self.request.query_params.get('customer_name')
+        status_filter = self.request.query_params.get('status')
+        start_date = self.request.query_params.get('start_date')
+        end_date = self.request.query_params.get('end_date')
+
+        if invoice_number:
+            qs = qs.filter(invoice__invoice_number__icontains=invoice_number)
+        if customer_name:
+            qs = qs.filter(customer__customer_name__icontains=customer_name)
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+        if start_date and end_date:
+            qs = qs.filter(return_date__range=[start_date, end_date])
+        elif start_date:
+            qs = qs.filter(return_date__gte=start_date)
+        elif end_date:
+            qs = qs.filter(return_date__lte=end_date)
+        return qs
+
+    @swagger_auto_schema(
+        operation_description=SALES_PERMISSION_NOTE,
+        manual_parameters=[
+            openapi.Parameter(
+                'invoice_number', openapi.IN_QUERY,
+                description="Filter by invoice number (partial match)",
+                type=openapi.TYPE_STRING,
+            ),
+            openapi.Parameter(
+                'customer_name', openapi.IN_QUERY,
+                description="Filter by customer name (partial match)",
+                type=openapi.TYPE_STRING,
+            ),
+            openapi.Parameter(
+                'status', openapi.IN_QUERY,
+                description="Filter by status ('Draft' or 'Saved')",
+                type=openapi.TYPE_STRING,
+            ),
+            openapi.Parameter(
+                'start_date', openapi.IN_QUERY,
+                description="Start date (YYYY-MM-DD)",
+                type=openapi.TYPE_STRING,
+            ),
+            openapi.Parameter(
+                'end_date', openapi.IN_QUERY,
+                description="End date (YYYY-MM-DD)",
+                type=openapi.TYPE_STRING,
+            ),
+            openapi.Parameter(
+                'page', openapi.IN_QUERY,
+                description="Page number (default: 1)",
+                type=openapi.TYPE_INTEGER,
+            ),
+            openapi.Parameter(
+                'page_size', openapi.IN_QUERY,
+                description="Results per page (default: 10, max: 100)",
+                type=openapi.TYPE_INTEGER,
+            ),
+        ],
+    )
+    def list(self, request, *args, **kwargs):
+        return super().list(request, *args, **kwargs)
+
+    @swagger_auto_schema(operation_description=SALES_PERMISSION_NOTE)
+    def create(self, request, *args, **kwargs):
+        return super().create(request, *args, **kwargs)
+
+    @swagger_auto_schema(operation_description=SALES_PERMISSION_NOTE)
+    def retrieve(self, request, *args, **kwargs):
+        return super().retrieve(request, *args, **kwargs)
+
+    @swagger_auto_schema(operation_description=SALES_PERMISSION_NOTE)
+    def update(self, request, *args, **kwargs):
+        return super().update(request, *args, **kwargs)
+
+    @swagger_auto_schema(operation_description=SALES_PERMISSION_NOTE)
+    def partial_update(self, request, *args, **kwargs):
+        return super().partial_update(request, *args, **kwargs)
+
+    @swagger_auto_schema(operation_description=SALES_PERMISSION_NOTE)
+    def destroy(self, request, *args, **kwargs):
+        sales_return = self.get_object()
+
+        with transaction.atomic():
+            if sales_return.status == 'Saved':
+                serializer = self.get_serializer()
+                serializer._reverse_return_balance_effects(sales_return)
+
+            sales_return.soft_delete()
+
+        return Response(
+            {"message": "Credit note moved to trash. Customer balance adjusted."},
+            status=drf_status.HTTP_200_OK,
+        )
+
+    @swagger_auto_schema(operation_description=SALES_PERMISSION_NOTE)
+    @action(detail=False, methods=['get'], url_path='trash')
+    def trash(self, request):
+        deleted = SalesReturn.all_objects.filter(is_deleted=True)
+        page = self.paginate_queryset(deleted)
+        serializer = self.get_serializer(page, many=True)
+        return self.get_paginated_response(serializer.data)
+
+    @swagger_auto_schema(operation_description=SALES_PERMISSION_NOTE)
+    @action(detail=True, methods=['post'], url_path='restore')
+    def restore(self, request, pk=None):
+        with transaction.atomic():
+            sales_return = SalesReturn.all_objects.filter(
+                id=pk, is_deleted=True
+            ).first()
+            if not sales_return:
+                return Response(
+                    {"error": "Not found in trash."},
+                    status=drf_status.HTTP_404_NOT_FOUND,
+                )
+
+            if sales_return.status == 'Saved':
+                serializer = self.get_serializer()
+                serializer._apply_return_balance_effects(sales_return)
+
+            sales_return.restore()
+
+        return Response({"message": "Credit note restored, balances re-applied."})
+
+    @swagger_auto_schema(operation_description=SALES_PERMISSION_NOTE)
+    @action(detail=True, methods=['delete'], url_path='permanent-delete')
+    def permanent_delete(self, request, pk=None):
+        if not request.user.is_superuser:
+            return Response(
+                {"error": "Only superuser can permanently delete."},
+                status=drf_status.HTTP_403_FORBIDDEN,
+            )
+        sales_return = SalesReturn.all_objects.filter(
+            id=pk, is_deleted=True
+        ).first()
+        if not sales_return:
+            return Response(
+                {"error": "Not found in trash."},
+                status=drf_status.HTTP_404_NOT_FOUND,
+            )
+        sales_return.delete()  # actual hard delete via Django's default
+        return Response({"message": "Permanently deleted."})

@@ -2,11 +2,16 @@
 
 from django.contrib import admin
 
-from sales.models import Customer, SalesInvoice, SalesItem
+from sales.models import Customer, SalesInvoice, SalesItem, SalesReturn, SalesReturnItem
 
 
 class SalesItemInline(admin.TabularInline):
     model = SalesItem
+    extra = 1
+
+
+class SalesReturnItemInline(admin.TabularInline):
+    model = SalesReturnItem
     extra = 1
 
 
@@ -28,3 +33,18 @@ class SalesInvoiceAdmin(admin.ModelAdmin):
 class SalesItemAdmin(admin.ModelAdmin):
     list_display = ("item_name", "invoice", "quantity", "rate", "total")
     list_filter = ("invoice",)
+
+
+@admin.register(SalesReturn)
+class SalesReturnAdmin(admin.ModelAdmin):
+    list_display = ("return_number", "invoice", "customer", "status", "return_date", "net_return_amount")
+    list_filter = ("status", "return_date", "customer")
+    search_fields = ("return_number", "invoice__invoice_number", "customer__customer_name")
+    inlines = [SalesReturnItemInline]
+
+
+@admin.register(SalesReturnItem)
+class SalesReturnItemAdmin(admin.ModelAdmin):
+    list_display = ("item_name", "sales_return", "quantity", "rate", "total")
+    list_filter = ("sales_return",)
+

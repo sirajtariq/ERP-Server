@@ -17,7 +17,7 @@ def validate_vendor_match(vendor_data):
     if not vendor_data:
         return None
     try:
-        vendor = Vendor.objects.get(vendor_id=vendor_data['vendor_id'])
+        vendor = Vendor.objects.get(id=vendor_data['id'])
         db_phone = vendor.phone or ''
         in_phone = vendor_data.get('phone') or ''
         if vendor.vendor_name.strip() != vendor_data['vendor_name'].strip() or db_phone.strip() != in_phone.strip():
@@ -31,11 +31,13 @@ def validate_vendor_match(vendor_data):
 class VendorSerializer(serializers.ModelSerializer):
     """Serializer for vendor master data."""
 
+    vendorId = serializers.CharField(source="vendor_id", read_only=True)
+
     class Meta:
         model = Vendor
         fields = [
             "id",
-            "vendor_id",
+            "vendorId",
             "vendor_name",
             "phone",
             "email",
@@ -50,7 +52,7 @@ class VendorSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = [
             "id",
-            "vendor_id",
+            "vendorId",
             "payable_balance",
             "advance_balance",
             "created_at",
@@ -93,11 +95,13 @@ class VendorListSerializer(serializers.ModelSerializer):
     invoices = VendorInvoiceSummarySerializer(many=True, read_only=True)
     total_paid = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
 
+    vendorId = serializers.CharField(source="vendor_id", read_only=True)
+
     class Meta:
         model = Vendor
         fields = [
             "id",
-            "vendor_id",
+            "vendorId",
             "vendor_name",
             "phone",
             "email",
@@ -144,7 +148,7 @@ class PurchaseItemNestedSerializer(serializers.ModelSerializer):
 
 
 class PurchaseInvoiceVendorRefSerializer(serializers.Serializer):
-    vendor_id = serializers.IntegerField()
+    id = serializers.IntegerField()
     vendor_name = serializers.CharField()
     phone = serializers.CharField(allow_blank=True, required=False)
 

@@ -9,8 +9,8 @@ This document is a comprehensive, line-by-line analysis of the ERP backend proje
 *   **Roles & Groups**: Four primary roles exist:
     *   `SUPER_ADMIN` (Superuser)
     *   `ADMIN` (Admin group)
-    *   `SALE_PERSON` (Sales group)
-    *   `PURCHASE_PERSON` (Purchase group)
+    *   `SALES_USER` (Sales group)
+    *   `PURCHASE_USER` (Purchase group)
 *   **RBAC (Role-Based Access Control)**: Enforced via custom permission classes in `erp_backend/permissions.py`:
     *   `IsAdminUser`: Admin/Superuser only.
     *   `IsSalesUser`: Sales/Admin/Superuser.

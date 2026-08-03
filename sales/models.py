@@ -16,7 +16,7 @@ class Customer(SoftDeleteModel):
         ('walkin', 'Walk-in'),
     )
 
-    customer_id = models.IntegerField(unique=True, editable=False, default=4000)
+    customer_id = models.CharField(max_length=20, unique=True, editable=False, blank=True)
     customer_name = models.CharField(max_length=255)
     customer_type = models.CharField(max_length=10, choices=CUSTOMER_TYPE_CHOICES)
     phone = models.CharField(max_length=20, unique=True, blank=True, null=True)
@@ -43,19 +43,25 @@ class Customer(SoftDeleteModel):
             for attempt in range(max_attempts):
                 with transaction.atomic():
                     if self.customer_type == 'walkin':
-                        start_id = 8000
-                        # FIX: Use all_objects instead of objects to see soft-deleted records
                         last = Customer.all_objects.filter(
                             customer_type='walkin'
                         ).order_by('-customer_id').first()
+                        if last and getattr(last, 'customer_id', '').startswith('WI-'):
+                            last_number = int(last.customer_id.split('-')[1])
+                            new_id = f"WI-{last_number + 1:05d}"
+                        else:
+                            new_id = "WI-00001"
                     else:
-                        start_id = 4000
-                        # FIX: Use all_objects instead of objects to see soft-deleted records
                         last = Customer.all_objects.filter(
                             customer_type='permanent'
                         ).order_by('-customer_id').first()
+                        if last and getattr(last, 'customer_id', '').startswith('PR-'):
+                            last_number = int(last.customer_id.split('-')[1])
+                            new_id = f"PR-{last_number + 1:05d}"
+                        else:
+                            new_id = "PR-00001"
 
-                    self.customer_id = (last.customer_id + 1) if last else start_id
+                    self.customer_id = new_id
 
                     try:
                         with transaction.atomic():
@@ -109,25 +115,25 @@ class SalesInvoice(SoftDeleteModel):
 
     @property
     def subtotal(self):
-        return sum((item.total for item in self.items.all()), Decimal('0.00'))
+        return sum((item.total for item in self.items.all()), Decimal('0.00')).quantize(Decimal('0.01'))
 
     @property
     def total_line_discount(self):
-        return sum(((item.quantity * item.rate) * (item.discount / Decimal('100')) for item in self.items.all()), Decimal('0.00'))
+        return sum(((item.quantity * item.rate) * (item.discount / Decimal('100')) for item in self.items.all()), Decimal('0.00')).quantize(Decimal('0.01'))
 
     @property
     def tax_amount(self):
         deducted_invoice_discount = self.subtotal * (Decimal(str(self.invoice_discount)) / Decimal('100'))
-        return (self.subtotal - deducted_invoice_discount) * (Decimal(str(self.vat_percentage)) / Decimal('100'))
+        return ((self.subtotal - deducted_invoice_discount) * (Decimal(str(self.vat_percentage)) / Decimal('100'))).quantize(Decimal('0.01'))
 
     @property
     def net_total(self):
         deducted_invoice_discount = self.subtotal * (Decimal(str(self.invoice_discount)) / Decimal('100'))
-        return (self.subtotal - deducted_invoice_discount) + self.tax_amount
+        return ((self.subtotal - deducted_invoice_discount) + self.tax_amount).quantize(Decimal('0.01'))
 
     @property
     def balance_due(self):
-        return self.net_total - Decimal(str(self.paid_amount))
+        return (self.net_total - Decimal(str(self.paid_amount))).quantize(Decimal('0.01'))
 
     def save(self, *args, **kwargs):
         if not self.invoice_number:
@@ -183,7 +189,7 @@ class SalesItem(models.Model):
 
     @property
     def total(self):
-        return (self.quantity * self.rate) - ((self.quantity * self.rate) * (self.discount / Decimal('100')))
+        return ((self.quantity * self.rate) - ((self.quantity * self.rate) * (self.discount / Decimal('100')))).quantize(Decimal('0.01'))
 
     def __str__(self) -> str:
         return f"{self.item_name} x{self.quantity}"
@@ -289,19 +295,19 @@ class Quotation(SoftDeleteModel):
 
     @property
     def subtotal(self):
-        return sum((item.line_total for item in self.items.all()), Decimal('0.00'))
+        return sum((item.line_total for item in self.items.all()), Decimal('0.00')).quantize(Decimal('0.01'))
 
     @property
     def discount_amount(self):
-        return self.subtotal * (Decimal(str(self.discount_percentage)) / Decimal('100'))
+        return (self.subtotal * (Decimal(str(self.discount_percentage)) / Decimal('100'))).quantize(Decimal('0.01'))
 
     @property
     def vat_amount(self):
-        return (self.subtotal - self.discount_amount) * (Decimal(str(self.vat_percentage)) / Decimal('100'))
+        return ((self.subtotal - self.discount_amount) * (Decimal(str(self.vat_percentage)) / Decimal('100'))).quantize(Decimal('0.01'))
 
     @property
     def total(self):
-        return self.subtotal - self.discount_amount + self.vat_amount
+        return (self.subtotal - self.discount_amount + self.vat_amount).quantize(Decimal('0.01'))
         
     @property
     def is_expired(self):
@@ -394,3 +400,115 @@ class QuotationItem(models.Model):
 
     def __str__(self) -> str:
         return f"{self.item_name} x{self.qty}"
+
+
+class SalesReturn(SoftDeleteModel):
+    """Sales Return / Credit Note header linked to an invoice and customer."""
+
+    STATUS_CHOICES = (
+        ('Draft', 'Draft'),
+        ('Saved', 'Saved'),
+    )
+
+    REFUND_TYPE_CHOICES = (
+        ('STORE_CREDIT', 'Store Credit / Customer Balance'),
+        ('CASH', 'Cash Refund Paid at Counter'),
+    )
+
+    return_number = models.CharField(max_length=50, unique=True, blank=True)
+    invoice = models.ForeignKey(
+        SalesInvoice,
+        on_delete=models.PROTECT,
+        related_name='returns',
+    )
+    customer = models.ForeignKey(
+        Customer,
+        on_delete=models.PROTECT,
+        related_name='returns',
+    )
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='Draft')
+    refund_type = models.CharField(max_length=20, choices=REFUND_TYPE_CHOICES, default='STORE_CREDIT')
+    return_date = models.DateField(default=timezone.localdate)
+    reason = models.TextField(blank=True)
+    notes = models.TextField(blank=True)
+    applied_to_credit = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    applied_to_advance = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-return_date", "-id"]
+
+    @property
+    def net_return_amount(self):
+        return sum((item.total for item in self.items.all()), Decimal('0.00')).quantize(Decimal('0.01'))
+
+    def save(self, *args, **kwargs):
+        if not self.return_number:
+            from datetime import date
+            current_year = date.today().year
+            prefix = f'CN-{current_year}-'
+
+            max_attempts = 5
+            for attempt in range(max_attempts):
+                with transaction.atomic():
+                    last = SalesReturn.all_objects.filter(
+                        return_number__startswith=prefix
+                    ).order_by('-id').first()
+
+                    if last:
+                        last_number = int(last.return_number.split('-')[-1])
+                        new_number = last_number + 1
+                    else:
+                        new_number = 1
+
+                    self.return_number = f'{prefix}{new_number:05d}'
+
+                    try:
+                        with transaction.atomic():
+                            super().save(*args, **kwargs)
+                        break  # success — exit retry loop
+                    except IntegrityError as e:
+                        if 'return_number' in str(e) and attempt < max_attempts - 1:
+                            continue
+                        raise
+        else:
+            super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        return self.return_number
+
+
+class SalesReturnItem(SoftDeleteModel):
+    """Line item belonging to a sales return / credit note."""
+
+    sales_return = models.ForeignKey(
+        SalesReturn,
+        on_delete=models.CASCADE,
+        related_name='items',
+    )
+    sales_item = models.ForeignKey(
+        SalesItem,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='return_items',
+    )
+    item_name = models.CharField(max_length=255)
+    quantity = models.DecimalField(max_digits=10, decimal_places=2)
+    rate = models.DecimalField(max_digits=12, decimal_places=2)
+    discount = models.DecimalField(
+        max_digits=12, decimal_places=2, default=0.0,
+        help_text="Discount percentage (0-100)"
+    )
+
+    class Meta:
+        ordering = ["id"]
+
+    @property
+    def total(self):
+        return ((self.quantity * self.rate) - (
+            (self.quantity * self.rate) * (self.discount / Decimal('100'))
+        )).quantize(Decimal('0.01'))
+
+    def __str__(self) -> str:
+        return f"{self.item_name} x{self.quantity}"

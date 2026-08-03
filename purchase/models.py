@@ -18,7 +18,7 @@ VENDOR_ID_START = 5000
 class Vendor(SoftDeleteModel):
     """Supplier / vendor master record."""
 
-    vendor_id = models.IntegerField(unique=True, editable=False, default=VENDOR_ID_START)
+    vendor_id = models.CharField(max_length=20, unique=True, editable=False, blank=True)
     vendor_name = models.CharField(max_length=255)
     # phone is null=True so multiple vendors with no phone store NULL
     # instead of '' — NULLs are exempt from unique constraints in SQL,
@@ -60,7 +60,12 @@ class Vendor(SoftDeleteModel):
                         .order_by('-vendor_id')
                         .first()
                     )
-                    self.vendor_id = (last.vendor_id + 1) if last else VENDOR_ID_START
+                    if last and getattr(last, 'vendor_id', '').startswith('VN-'):
+                        last_number = int(last.vendor_id.split('-')[1])
+                        new_id = f"VN-{last_number + 1:05d}"
+                    else:
+                        new_id = "VN-00001"
+                    self.vendor_id = new_id
 
                     try:
                         with transaction.atomic():
@@ -115,25 +120,25 @@ class PurchaseInvoice(SoftDeleteModel):
 
     @property
     def subtotal(self):
-        return sum((item.quantity * item.purchase_price for item in self.items.all()), Decimal('0.00'))
+        return sum((item.quantity * item.purchase_price for item in self.items.all()), Decimal('0.00')).quantize(Decimal('0.01'))
 
     @property
     def total_line_discount(self):
-        return sum(((item.quantity * item.purchase_price) * (item.discount / Decimal('100')) for item in self.items.all()), Decimal('0.00'))
+        return sum(((item.quantity * item.purchase_price) * (item.discount / Decimal('100')) for item in self.items.all()), Decimal('0.00')).quantize(Decimal('0.01'))
 
     @property
     def tax_amount(self):
-        return (self.subtotal - self.total_line_discount) * (self.vat_percentage / Decimal('100'))
+        return ((self.subtotal - self.total_line_discount) * (self.vat_percentage / Decimal('100'))).quantize(Decimal('0.01'))
 
     @property
     def net_total(self):
         base_amount = self.subtotal - self.total_line_discount
         deducted_invoice_discount = base_amount * (self.invoice_discount / Decimal('100'))
-        return base_amount + self.tax_amount - deducted_invoice_discount
+        return (base_amount + self.tax_amount - deducted_invoice_discount).quantize(Decimal('0.01'))
 
     @property
     def balance_due(self):
-        return self.net_total - self.paid_amount - self.advance_applied
+        return (self.net_total - self.paid_amount - self.advance_applied).quantize(Decimal('0.01'))
 
     @property
     def payment_status(self):
@@ -203,7 +208,7 @@ class PurchaseItem(models.Model):
 
     @property
     def total(self):
-        return (self.quantity * self.purchase_price) - ((self.quantity * self.purchase_price) * (self.discount / Decimal('100')))
+        return ((self.quantity * self.purchase_price) - ((self.quantity * self.purchase_price) * (self.discount / Decimal('100')))).quantize(Decimal('0.01'))
 
     def __str__(self) -> str:
         return f"{self.product_name} x{self.quantity}"
