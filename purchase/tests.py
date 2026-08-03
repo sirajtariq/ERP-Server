@@ -2175,7 +2175,7 @@ class PurchaseRBACTests(APITestCase):
             resp = self.client.get(url)
             self.assertEqual(
                 resp.status_code, status.HTTP_403_FORBIDDEN,
-                f"SALE_PERSON should get 403 on {url}",
+                f"SALES_USER should get 403 on {url}",
             )
 
     # ── Purchase user succeeds on read/write ─────────────────────────
@@ -2186,7 +2186,7 @@ class PurchaseRBACTests(APITestCase):
             resp = self.client.get(url)
             self.assertEqual(
                 resp.status_code, status.HTTP_200_OK,
-                f"PURCHASE_PERSON should get 200 on GET {url}",
+                f"PURCHASE_USER should get 200 on GET {url}",
             )
 
     def test_purchase_user_can_create_vendor(self):
@@ -2226,7 +2226,7 @@ class PurchaseRBACTests(APITestCase):
             f"/api/purchase/vendors/{self.vendor.vendor_id}/",
         )
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN,
-                         "PURCHASE_PERSON should be blocked from DELETE by OnlyAdminCanDelete")
+                         "PURCHASE_USER should be blocked from DELETE by OnlyAdminCanDelete")
 
     def test_purchase_user_cannot_delete_invoice(self):
         self.client.force_authenticate(user=self.purchase)

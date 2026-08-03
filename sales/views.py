@@ -407,6 +407,9 @@ class SalesInvoiceViewSet(viewsets.ModelViewSet):
         invoice_number = self.request.query_params.get("invoice_number")
         customer_id = self.request.query_params.get("customer_id")
         customer_type = self.request.query_params.get("type")
+        status = self.request.query_params.get("status")
+        start_date = self.request.query_params.get("start_date")
+        end_date = self.request.query_params.get("end_date")
 
         if name:
             qs = qs.filter(customer__customer_name__icontains=name)
@@ -414,6 +417,15 @@ class SalesInvoiceViewSet(viewsets.ModelViewSet):
             qs = qs.filter(invoice_number__icontains=invoice_number)
         if customer_id:
             qs = qs.filter(customer__customer_id=customer_id)
+        if status:
+            qs = qs.filter(status=status)
+            
+        if start_date and end_date:
+            qs = qs.filter(date__range=[start_date, end_date])
+        elif start_date:
+            qs = qs.filter(date__gte=start_date)
+        elif end_date:
+            qs = qs.filter(date__lte=end_date)
 
         if customer_type == 'walkin':
             qs = qs.filter(customer__isnull=True)
@@ -453,6 +465,21 @@ class SalesInvoiceViewSet(viewsets.ModelViewSet):
                 "ordering", openapi.IN_QUERY,
                 description="Sort field. Prefix with '-' for descending. "
                             "E.g. '-date', 'invoice_number', 'paid_amount'",
+                type=openapi.TYPE_STRING,
+            ),
+            openapi.Parameter(
+                "status", openapi.IN_QUERY,
+                description="Filter by invoice status (e.g. 'Saved', 'Draft')",
+                type=openapi.TYPE_STRING,
+            ),
+            openapi.Parameter(
+                "start_date", openapi.IN_QUERY,
+                description="Start date for filtering (YYYY-MM-DD)",
+                type=openapi.TYPE_STRING,
+            ),
+            openapi.Parameter(
+                "end_date", openapi.IN_QUERY,
+                description="End date for filtering (YYYY-MM-DD)",
                 type=openapi.TYPE_STRING,
             ),
         ],
@@ -752,16 +779,84 @@ class QuotationViewSet(viewsets.ModelViewSet):
     permission_classes = [IsSalesUser, OnlyAdminCanDelete]
     pagination_class = CustomPageNumberPagination
 
+    filter_backends = [OrderingFilter]
+    ordering_fields = "__all__"
+    ordering = ["-date", "-id"]
+
     def get_queryset(self):
         # We compute effective_status on read and use annotations if needed for filtering, 
         # or we just filter using python logic if needed, but normally we just query DB.
         queryset = Quotation.all_objects.all() if self.request.user.is_superuser else Quotation.objects.all()
         
         status = self.request.query_params.get('status')
+        customer_name = self.request.query_params.get('customer_name')
+        quotation_number = self.request.query_params.get('quotation_number')
+        start_date = self.request.query_params.get('start_date')
+        end_date = self.request.query_params.get('end_date')
+
         if status:
             queryset = queryset.filter(status=status)
+        if customer_name:
+            queryset = queryset.filter(customer_data__customer_name__icontains=customer_name)
+        if quotation_number:
+            queryset = queryset.filter(quotation_number__icontains=quotation_number)
             
-        return queryset.order_by('-date', '-id')
+        if start_date and end_date:
+            queryset = queryset.filter(date__range=[start_date, end_date])
+        elif start_date:
+            queryset = queryset.filter(date__gte=start_date)
+        elif end_date:
+            queryset = queryset.filter(date__lte=end_date)
+            
+        return queryset
+
+    @swagger_auto_schema(
+        operation_description="API endpoint for managing sales quotations.",
+        manual_parameters=[
+            openapi.Parameter(
+                "customer_name", openapi.IN_QUERY,
+                description="Search quotations by customer name (case-insensitive, partial match)",
+                type=openapi.TYPE_STRING,
+            ),
+            openapi.Parameter(
+                "quotation_number", openapi.IN_QUERY,
+                description="Search quotations by quotation number (case-insensitive, partial match)",
+                type=openapi.TYPE_STRING,
+            ),
+            openapi.Parameter(
+                "status", openapi.IN_QUERY,
+                description="Filter by quotation status",
+                type=openapi.TYPE_STRING,
+            ),
+            openapi.Parameter(
+                "start_date", openapi.IN_QUERY,
+                description="Start date for filtering (YYYY-MM-DD)",
+                type=openapi.TYPE_STRING,
+            ),
+            openapi.Parameter(
+                "end_date", openapi.IN_QUERY,
+                description="End date for filtering (YYYY-MM-DD)",
+                type=openapi.TYPE_STRING,
+            ),
+            openapi.Parameter(
+                "page", openapi.IN_QUERY,
+                description="Page number (default: 1)",
+                type=openapi.TYPE_INTEGER,
+            ),
+            openapi.Parameter(
+                "page_size", openapi.IN_QUERY,
+                description="Results per page (default: 10, max: 100)",
+                type=openapi.TYPE_INTEGER,
+            ),
+            openapi.Parameter(
+                "ordering", openapi.IN_QUERY,
+                description="Sort field. Prefix with '-' for descending.",
+                type=openapi.TYPE_STRING,
+            ),
+        ],
+    )
+    def list(self, request, *args, **kwargs):
+        return super().list(request, *args, **kwargs)
 
     def get_serializer_class(self):
         if self.action == 'list':

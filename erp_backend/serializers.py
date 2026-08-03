@@ -30,7 +30,7 @@ class UserReadSerializer(serializers.ModelSerializer):
 
 class UserSerializer(serializers.ModelSerializer):
     role = serializers.ChoiceField(
-        choices=["Admin", "Sales", "Purchase"], 
+        choices=["ADMIN", "SALES_USER", "PURCHASE_USER"], 
         write_only=True,
         required=True,
         help_text="Role to assign to the user (maps to Django Group)."
@@ -63,7 +63,13 @@ class UserSerializer(serializers.ModelSerializer):
         }
 
     def create(self, validated_data):
-        role_name = validated_data.pop('role')
+        role_enum = validated_data.pop('role')
+        role_mapping = {
+            "ADMIN": "Admin",
+            "SALES_USER": "Sales",
+            "PURCHASE_USER": "Purchase"
+        }
+        role_name = role_mapping.get(role_enum)
         
         # Pop profile fields
         profile_data = {
@@ -91,7 +97,13 @@ class UserSerializer(serializers.ModelSerializer):
         return user
 
     def update(self, instance, validated_data):
-        role_name = validated_data.pop('role', None)
+        role_enum = validated_data.pop('role', None)
+        role_mapping = {
+            "ADMIN": "Admin",
+            "SALES_USER": "Sales",
+            "PURCHASE_USER": "Purchase"
+        }
+        role_name = role_mapping.get(role_enum) if role_enum else None
         
         profile_fields = [
             'fullname', 'phone', 'cnic', 'address', 'designation',
@@ -133,8 +145,8 @@ from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 ROLE_MAP = {
     "superuser": "SUPER_ADMIN",
     "Admin": "ADMIN",
-    "Sales": "SALE_PERSON",
-    "Purchase": "PURCHASE_PERSON",
+    "Sales": "SALES_USER",
+    "Purchase": "PURCHASE_USER",
 }
 
 
@@ -156,7 +168,7 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         """
         Return the single primary role for a user using uppercase constants.
 
-        Priority: SUPER_ADMIN > ADMIN > SALE_PERSON > PURCHASE_PERSON
+        Priority: SUPER_ADMIN > ADMIN > SALES_USER > PURCHASE_USER
         """
         if user.is_superuser:
             return ROLE_MAP["superuser"]
