@@ -92,7 +92,7 @@ class Command(BaseCommand):
             )
 
         existing = SalesInvoice.objects.count()
-        if existing >= 20 and not clear:
+        if existing >= 2000 and not clear:
             self.stdout.write(
                 self.style.SUCCESS(
                     f"Already {existing} invoices in DB. Skipping seed. "

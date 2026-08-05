@@ -31,6 +31,7 @@ INSTALLED_APPS = [
     # Business modules
     "sales.apps.SalesConfig",
     "purchase.apps.PurchaseConfig",
+    "dashboard",
 ]
 
 MIDDLEWARE = [

@@ -206,6 +206,7 @@ class CustomerViewSet(viewsets.ModelViewSet):
         if from_date and to_date:
             prior_invoices = customer.invoices.filter(status='Saved', date__lt=from_date)
             prior_payments = customer.payments.filter(date__lt=from_date)
+            prior_returns = customer.returns.filter(status='Saved', return_date__lt=from_date)
             balance_before_range = Decimal(str(customer.opening_credit or '0.00'))
             for inv in prior_invoices:
                 balance_before_range += Decimal(str(inv.net_total))
@@ -213,6 +214,9 @@ class CustomerViewSet(viewsets.ModelViewSet):
                 balance_before_range -= Decimal(str(pay.amount_received))
             for inv in prior_invoices:
                 balance_before_range -= Decimal(str(inv.advance_applied))
+                balance_before_range -= Decimal(str(inv.paid_amount))
+            for ret in prior_returns:
+                balance_before_range -= Decimal(str(ret.net_return_amount))
             opening_credit_for_range = balance_before_range
             opening_desc = "Balance Brought Forward"
             
@@ -231,8 +235,11 @@ class CustomerViewSet(viewsets.ModelViewSet):
         all_payments = list(payments.select_related("invoice"))
 
         credit_sales = sum((Decimal(str(inv.net_total)) for inv in all_invoices if inv.payment_term == "Credit"), Decimal('0.00'))
-        cash_return = sum((Decimal(str(inv.paid_amount)) for inv in all_invoices if inv.payment_term == "Cash"), Decimal('0.00'))
-        total_paid = sum((Decimal(str(pay.amount_received)) for pay in all_payments), Decimal('0.00'))
+        
+        standalone_payments = sum((Decimal(str(pay.amount_received)) for pay in all_payments), Decimal('0.00'))
+        invoice_payments = sum((Decimal(str(inv.paid_amount)) for inv in all_invoices), Decimal('0.00'))
+        total_paid = standalone_payments + invoice_payments
+        
         total_purchases = sum((Decimal(str(inv.net_total)) for inv in all_invoices), Decimal('0.00'))
         total_invoices = len(all_invoices)
         total_advance_applied = sum((Decimal(str(inv.advance_applied)) for inv in all_invoices), Decimal('0.00'))
@@ -291,6 +298,18 @@ class CustomerViewSet(viewsets.ModelViewSet):
                     "balance": Decimal('0.00'),
                     "_sort_ts": inv.created_at,
                 })
+            if inv.paid_amount > 0:
+                ledger_rows.append({
+                    "date": inv.date.isoformat() if inv.date else None,
+                    "voucher": f"PAY-{inv.invoice_number}",
+                    "description": f"Invoice Payment - {inv.payment_term}",
+                    "referenceType": "invoice",
+                    "referenceId": inv.id,
+                    "debit": Decimal('0.00'),
+                    "credit": Decimal(str(inv.paid_amount)),
+                    "balance": Decimal('0.00'),
+                    "_sort_ts": inv.created_at,
+                })
 
         for pay in all_payments:
             description = f"Payment - {pay.invoice.invoice_number}" if pay.invoice else "General Payment"
@@ -341,7 +360,7 @@ class CustomerViewSet(viewsets.ModelViewSet):
 
         summary = {
             "creditSales": credit_sales,
-            "cashReturn": cash_return,
+            "cashReturn": total_returns,
             "advanceApplied": total_advance_applied,
             "totalCollected": total_paid,
             "remainingBalance": remaining_balance,

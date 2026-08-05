@@ -69,6 +69,7 @@ urlpatterns = [
     # Module APIs
     path("api/sales/", include("sales.urls")),
     path("api/purchase/", include("purchase.urls")),
+    path("api/dashboard/", include("dashboard.urls")),
     # Interactive API documentation
     path(
         "swagger/",
