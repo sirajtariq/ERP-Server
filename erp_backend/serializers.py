@@ -240,7 +240,7 @@ class UserMeSerializer(serializers.ModelSerializer):
         return CustomTokenObtainPairSerializer._resolve_role(obj)
 
 
-from .models import BusinessSettings
+from .models import BusinessSettings, BackupSetting
 
 class BusinessSettingsSerializer(serializers.ModelSerializer):
     class Meta:
@@ -250,3 +250,17 @@ class BusinessSettingsSerializer(serializers.ModelSerializer):
             'email', 'address', 'created_at', 'updated_at'
         ]
         read_only_fields = ['created_at', 'updated_at']
+
+class BackupSettingSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = BackupSetting
+        fields = [
+            'backup_directory', 'backup_frequency', 'backup_time',
+            'retention_days', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['created_at', 'updated_at']
+
+    def validate_backup_directory(self, value):
+        if value:
+            value = value.strip().strip("'").strip('"')
+        return value

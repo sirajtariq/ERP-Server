@@ -55,3 +55,36 @@ class BusinessSettings(models.Model):
 
     def __str__(self):
         return self.business_name or "Business Settings"
+
+class BackupSetting(models.Model):
+    """
+    Singleton model to hold database backup configurations.
+    """
+    FREQUENCY_CHOICES = [
+        ('DAILY', 'Daily'),
+        ('WEEKLY', 'Weekly'),
+        ('MONTHLY', 'Monthly'),
+        ('NEVER', 'Never')
+    ]
+    
+    backup_directory = models.CharField(max_length=500, default="C:/ERP_Backups", blank=True)
+    backup_frequency = models.CharField(max_length=20, choices=FREQUENCY_CHOICES, default='DAILY')
+    backup_time = models.TimeField(default="20:00:00")
+    retention_days = models.IntegerField(default=30)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def save(self, *args, **kwargs):
+        self.pk = 1
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        pass
+
+    @classmethod
+    def get_settings(cls):
+        setting, _ = cls.objects.get_or_create(pk=1)
+        return setting
+
+    def __str__(self):
+        return f"Backup Settings (Freq: {self.backup_frequency}, Time: {self.backup_time})"

@@ -19,7 +19,10 @@ from rest_framework_simplejwt.views import TokenRefreshView, TokenBlacklistView
 from django.conf import settings
 from django.conf.urls.static import static
 
-from erp_backend.views import UserViewSet, CustomTokenObtainPairView, PasswordChangeAPIView, UserMeAPIView, BusinessSettingsAPIView
+from erp_backend.views import (
+    UserViewSet, CustomTokenObtainPairView, PasswordChangeAPIView, 
+    UserMeAPIView, BusinessSettingsAPIView, BackupSettingAPIView, TriggerBackupView, RestoreBackupView
+)
 
 router = DefaultRouter()
 router.register(r"users", UserViewSet, basename="user")
@@ -65,6 +68,9 @@ urlpatterns = [
     path("api/auth/me/", UserMeAPIView.as_view(), name="user_me"),
     # Core APIs
     path("api/settings/business/", BusinessSettingsAPIView.as_view(), name="business_settings"),
+    path("api/settings/backup/", BackupSettingAPIView.as_view(), name="backup_settings"),
+    path("api/settings/backup/trigger/", TriggerBackupView.as_view(), name="trigger_backup"),
+    path("api/settings/backup/restore/", RestoreBackupView.as_view(), name="restore_backup"),
     path("api/", include(router.urls)),
     # Module APIs
     path("api/sales/", include("sales.urls")),
