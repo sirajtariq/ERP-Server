@@ -16,7 +16,13 @@ class ErpBackendConfig(AppConfig):
     def ready(self) -> None:
         """Connect the post-migrate signal to seed default auth groups."""
         from django.db.models.signals import post_migrate
+        import os
 
         from erp_backend.signals import create_default_groups
 
         post_migrate.connect(create_default_groups, sender=self)
+
+        # Start the background scheduler (only in the main process)
+        if os.environ.get('RUN_MAIN') == 'true':
+            from erp_backend.scheduler import start_scheduler
+            start_scheduler()
