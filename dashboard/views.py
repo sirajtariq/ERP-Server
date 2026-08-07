@@ -98,6 +98,8 @@ class DashboardCardsAPIView(APIView):
             'supplier_payable': float(supplier_payable),
             'vendor_advance': float(vendor_advance),
             'supplier_paid': float(supplier_paid),
+            'total_vendor_payments': float(supplier_paid),
+            'total_cash_outflow': float(outgoing_expense + supplier_paid),
             'incoming_cash': float(incoming_cash),
         })
 

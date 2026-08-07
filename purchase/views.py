@@ -13,6 +13,7 @@ from rest_framework.decorators import action
 from rest_framework.filters import OrderingFilter
 from rest_framework.response import Response
 from rest_framework import status as drf_status
+from rest_framework.views import APIView
 from rest_framework.exceptions import ValidationError as serializers_ValidationError
 
 from django.db import transaction
@@ -771,3 +772,111 @@ class ExpenseViewSet(PurchaseCamelCaseMixin, viewsets.ModelViewSet):
             )
         expense.delete()
         return Response({"message": "Permanently deleted."})
+
+class DailyOutflowsView(PurchaseCamelCaseMixin, APIView):
+    """
+    Unified Read-Only API endpoint for Daily Cash Outflows.
+    Combines Expenses and Vendor Payments.
+    """
+    permission_classes = [IsPurchaseUser]
+
+    @swagger_auto_schema(
+        operation_description="Unified Read-Only API endpoint for Daily Cash Outflows",
+        manual_parameters=[
+            openapi.Parameter("start_date", openapi.IN_QUERY, description="Start date (YYYY-MM-DD)", type=openapi.TYPE_STRING),
+            openapi.Parameter("end_date", openapi.IN_QUERY, description="End date (YYYY-MM-DD)", type=openapi.TYPE_STRING),
+            openapi.Parameter("category", openapi.IN_QUERY, description="Category filter", type=openapi.TYPE_STRING),
+            openapi.Parameter("type", openapi.IN_QUERY, description="Type filter (EXPENSE or VENDOR_PAYMENT)", type=openapi.TYPE_STRING),
+            openapi.Parameter("expense_number", openapi.IN_QUERY, description="Expense / Payment number filter", type=openapi.TYPE_STRING),
+            openapi.Parameter("page", openapi.IN_QUERY, description="Page number", type=openapi.TYPE_INTEGER),
+            openapi.Parameter("page_size", openapi.IN_QUERY, description="Results per page", type=openapi.TYPE_INTEGER),
+        ]
+    )
+    def get(self, request, *args, **kwargs):
+        start_date = request.query_params.get("start_date")
+        end_date = request.query_params.get("end_date")
+        category = request.query_params.get("category")
+        type_filter = request.query_params.get("type")
+        expense_number = request.query_params.get("expense_number")
+
+        expenses = Expense.objects.filter(is_deleted=False).prefetch_related('items')
+        vendor_payments = VendorPayment.objects.filter(is_deleted=False).select_related('vendor', 'invoice')
+
+        if start_date:
+            expenses = expenses.filter(date__gte=start_date)
+            vendor_payments = vendor_payments.filter(date__gte=start_date)
+        if end_date:
+            expenses = expenses.filter(date__lte=end_date)
+            vendor_payments = vendor_payments.filter(date__lte=end_date)
+        if category:
+            expenses = expenses.filter(category__icontains=category)
+            if "vendor" not in category.lower() and "payment" not in category.lower():
+                vendor_payments = vendor_payments.none()
+        if type_filter:
+            if type_filter.upper() == "EXPENSE":
+                vendor_payments = vendor_payments.none()
+            elif type_filter.upper() == "VENDOR_PAYMENT":
+                expenses = expenses.none()
+        if expense_number:
+            expenses = expenses.filter(expense_number__icontains=expense_number)
+            vendor_payments = vendor_payments.filter(payment_number__icontains=expense_number)
+
+        combined_outflows = []
+        total_expenses = Decimal('0.00')
+        total_vendor_payments = Decimal('0.00')
+
+        for exp_obj in expenses:
+            total_expenses += exp_obj.amount
+            mapped_exp = {
+                "id": exp_obj.id,
+                "expense_number": exp_obj.expense_number,
+                "category": exp_obj.category,
+                "amount": str(exp_obj.amount),
+                "person_supplier": exp_obj.person_supplier,
+                "payment_method": exp_obj.payment_method,
+                "date": exp_obj.date.isoformat() if exp_obj.date else None,
+                "created_at": exp_obj.created_at.isoformat() if exp_obj.created_at else None,
+                "type": "EXPENSE",
+                "_date": exp_obj.date.isoformat() if exp_obj.date else "",
+                "_created_at": exp_obj.created_at
+            }
+            combined_outflows.append(mapped_exp)
+
+        for vp_obj in vendor_payments:
+            total_vendor_payments += vp_obj.amount_paid
+            mapped_vp = {
+                "id": vp_obj.id,
+                "expense_number": vp_obj.payment_number,
+                "category": "Vendor Payment",
+                "amount": str(vp_obj.amount_paid),
+                "person_supplier": vp_obj.vendor.vendor_name if vp_obj.vendor else "",
+                "payment_method": vp_obj.method,
+                "date": vp_obj.date.isoformat() if vp_obj.date else None,
+                "created_at": vp_obj.created_at.isoformat() if vp_obj.created_at else None,
+                "type": "VENDOR_PAYMENT",
+                "_date": vp_obj.date.isoformat() if vp_obj.date else "",
+                "_created_at": vp_obj.created_at
+            }
+            combined_outflows.append(mapped_vp)
+
+        # Sort by date and createdAt descending
+        combined_outflows.sort(key=lambda x: (x["_date"], x["_created_at"]), reverse=True)
+        
+        # Remove internal sorting keys
+        for item in combined_outflows:
+            item.pop("_date", None)
+            item.pop("_created_at", None)
+
+        total_combined_outflow = total_expenses + total_vendor_payments
+
+        paginator = CustomPageNumberPagination()
+        paginated_data = paginator.paginate_queryset(combined_outflows, request, view=self)
+
+        response = paginator.get_paginated_response(paginated_data)
+        response.data["summary"] = {
+            "totalExpenses": float(total_expenses),
+            "totalVendorPayments": float(total_vendor_payments),
+            "totalCombinedOutflow": float(total_combined_outflow),
+        }
+        return response
+
