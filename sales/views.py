@@ -443,7 +443,7 @@ class SalesInvoiceViewSet(viewsets.ModelViewSet):
     """
 
     queryset = SalesInvoice.objects.select_related("customer").prefetch_related(
-        "items"
+        "items", "returns", "items__return_items", "returns__items"
     )
     serializer_class = SalesInvoiceSerializer
     permission_classes = [IsSalesUser, OnlyAdminCanDelete]

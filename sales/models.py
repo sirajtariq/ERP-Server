@@ -135,6 +135,15 @@ class SalesInvoice(SoftDeleteModel):
     def balance_due(self):
         return (self.net_total - Decimal(str(self.paid_amount))).quantize(Decimal('0.01'))
 
+    @property
+    def total_returned_amount(self):
+        from decimal import Decimal
+        return sum((ret.net_return_amount for ret in self.returns.all() if ret.status == 'Saved'), Decimal('0.00')).quantize(Decimal('0.01'))
+
+    @property
+    def net_total_after_returns(self):
+        return (self.net_total - self.total_returned_amount).quantize(Decimal('0.01'))
+
     def save(self, *args, **kwargs):
         if not self.invoice_number:
             from datetime import date

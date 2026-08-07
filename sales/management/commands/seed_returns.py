@@ -72,7 +72,7 @@ class Command(BaseCommand):
             )
 
         existing = SalesReturn.objects.count()
-        if existing >= 5 and not clear:
+        if existing >= 50 and not clear:
             self.stdout.write(
                 self.style.SUCCESS(
                     f"Already {existing} returns in DB. Skipping seed. "

@@ -103,21 +103,29 @@ class CustomerSerializer(serializers.ModelSerializer):
 class SalesItemSerializer(serializers.ModelSerializer):
     """Serializer for standalone sales invoice line items."""
     total = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    isReturned = serializers.SerializerMethodField()
 
     class Meta:
         model = SalesItem
-        fields = ["id", "invoice", "item_name", "units", "quantity", "rate", "discount", "total"]
+        fields = ["id", "invoice", "item_name", "units", "quantity", "rate", "discount", "total", "isReturned"]
         read_only_fields = ["id", "total"]
+
+    def get_isReturned(self, obj):
+        return bool(obj.return_items.all())
 
 
 class SalesItemNestedSerializer(serializers.ModelSerializer):
     """Nested line item serializer (invoice is set by the parent invoice)."""
     total = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    isReturned = serializers.SerializerMethodField()
 
     class Meta:
         model = SalesItem
-        fields = ["id", "item_name", "units", "quantity", "rate", "discount", "total"]
+        fields = ["id", "item_name", "units", "quantity", "rate", "discount", "total", "isReturned"]
         read_only_fields = ["id", "total"]
+
+    def get_isReturned(self, obj):
+        return bool(obj.return_items.all())
 
 
 def compute_payment_status(invoice):
@@ -150,6 +158,9 @@ class SalesInvoiceListSerializer(serializers.ModelSerializer):
     pending = serializers.SerializerMethodField()
     paymentStatus = serializers.SerializerMethodField()
     invoiceStatus = serializers.CharField(source='status', read_only=True)
+    returnedItemsCount = serializers.SerializerMethodField()
+    totalReturnedAmount = serializers.DecimalField(source='total_returned_amount', max_digits=12, decimal_places=2, read_only=True)
+    netTotalAfterReturns = serializers.DecimalField(source='net_total_after_returns', max_digits=12, decimal_places=2, read_only=True)
 
     class Meta:
         model = SalesInvoice
@@ -163,8 +174,14 @@ class SalesInvoiceListSerializer(serializers.ModelSerializer):
             'paymentStatus',
             'invoiceStatus',
             'date',
+            'returnedItemsCount',
+            'totalReturnedAmount',
+            'netTotalAfterReturns',
         ]
         read_only_fields = fields
+
+    def get_returnedItemsCount(self, obj):
+        return sum(1 for item in obj.items.all() if item.return_items.all())
 
     def get_customerName(self, obj):
         return obj.customer.customer_name if obj.customer else None
@@ -253,6 +270,9 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
     tax_amount = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     net_total = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     balance_due = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    returnedItemsCount = serializers.SerializerMethodField()
+    totalReturnedAmount = serializers.DecimalField(source='total_returned_amount', max_digits=12, decimal_places=2, read_only=True)
+    netTotalAfterReturns = serializers.DecimalField(source='net_total_after_returns', max_digits=12, decimal_places=2, read_only=True)
 
     class Meta:
         model = SalesInvoice
@@ -277,6 +297,9 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             "net_total",
             "balance_due",
             "advance_applied",
+            "returnedItemsCount",
+            "totalReturnedAmount",
+            "netTotalAfterReturns",
         ]
         read_only_fields = [
             "id", 
@@ -288,7 +311,13 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             "balance_due",
             "advance_applied",
             "paymentStatus",
+            "returnedItemsCount",
+            "totalReturnedAmount",
+            "netTotalAfterReturns",
         ]
+
+    def get_returnedItemsCount(self, obj):
+        return sum(1 for item in obj.items.all() if item.return_items.all())
 
     def get_paymentStatus(self, obj):
         return compute_payment_status(obj)
