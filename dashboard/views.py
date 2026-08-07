@@ -7,7 +7,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 
-from sales.models import SalesInvoice, Customer, PaymentReceived
+from sales.models import SalesInvoice, Customer, PaymentReceived, SalesReturn
 from purchase.models import PurchaseInvoice, Vendor, VendorPayment, Expense
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
@@ -35,6 +35,7 @@ class DashboardCardsAPIView(APIView):
         expense_qs = Expense.objects.all()
         payment_received_qs = PaymentReceived.objects.all()
         vendor_payment_qs = VendorPayment.objects.all()
+        sales_return_qs = SalesReturn.objects.filter(status='Saved')
 
         if from_date:
             sales_qs = sales_qs.filter(date__gte=from_date)
@@ -42,6 +43,7 @@ class DashboardCardsAPIView(APIView):
             expense_qs = expense_qs.filter(date__gte=from_date)
             payment_received_qs = payment_received_qs.filter(date__gte=from_date)
             vendor_payment_qs = vendor_payment_qs.filter(date__gte=from_date)
+            sales_return_qs = sales_return_qs.filter(return_date__gte=from_date)
             
         if to_date:
             sales_qs = sales_qs.filter(date__lte=to_date)
@@ -49,12 +51,14 @@ class DashboardCardsAPIView(APIView):
             expense_qs = expense_qs.filter(date__lte=to_date)
             payment_received_qs = payment_received_qs.filter(date__lte=to_date)
             vendor_payment_qs = vendor_payment_qs.filter(date__lte=to_date)
+            sales_return_qs = sales_return_qs.filter(return_date__lte=to_date)
 
         # Calculate properties in python (since net_total is a property)
         # For a robust enterprise app with 1M+ rows we would annotate DB directly, 
         # but for this structure utilizing properties is accurate and suitable.
         sales_invoices = list(sales_qs.prefetch_related('items'))
         purchase_invoices = list(purchase_qs.prefetch_related('items'))
+        sales_returns = list(sales_return_qs.prefetch_related('items'))
 
         total_sales = sum((inv.net_total for inv in sales_invoices), Decimal('0.00'))
         
@@ -62,10 +66,12 @@ class DashboardCardsAPIView(APIView):
         credit_sales = sum((inv.net_total for inv in sales_invoices if inv.payment_term == 'Credit'), Decimal('0.00'))
 
         total_purchases = sum((inv.net_total for inv in purchase_invoices), Decimal('0.00'))
+        
+        total_sales_returns = sum((ret.net_return_amount for ret in sales_returns), Decimal('0.00'))
 
         outgoing_expense = expense_qs.aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
 
-        profit = total_sales - (total_purchases + outgoing_expense)
+        profit = (total_sales - total_sales_returns) - (total_purchases + outgoing_expense)
 
         incoming_cash = payment_received_qs.aggregate(total=Sum('amount_received'))['total'] or Decimal('0.00')
 
@@ -73,17 +79,27 @@ class DashboardCardsAPIView(APIView):
 
         # Receivable & Payable (Current total balance, irrespective of dates)
         receivable = Customer.objects.aggregate(total=Sum('credit_balance'))['total'] or Decimal('0.00')
+        customer_advance = Customer.objects.aggregate(total=Sum('advance_balance'))['total'] or Decimal('0.00')
+        
         supplier_payable = Vendor.objects.aggregate(total=Sum('payable_balance'))['total'] or Decimal('0.00')
+        vendor_advance = Vendor.objects.aggregate(total=Sum('advance_balance'))['total'] or Decimal('0.00')
 
         return Response({
             'total_sales': float(total_sales),
+            'total_purchases': float(total_purchases),
             'receivable': float(receivable),
+            'customer_advance': float(customer_advance),
             'profit': float(profit),
             'cash_sales': float(cash_sales),
             'credit_sales': float(credit_sales),
+            'total_sales_returns': float(total_sales_returns),
             'outgoing_expense': float(outgoing_expense),
+            'total_expenses': float(outgoing_expense),  # Added alias for clarity
             'supplier_payable': float(supplier_payable),
+            'vendor_advance': float(vendor_advance),
             'supplier_paid': float(supplier_paid),
+            'total_vendor_payments': float(supplier_paid),
+            'total_cash_outflow': float(outgoing_expense + supplier_paid),
             'incoming_cash': float(incoming_cash),
         })
 

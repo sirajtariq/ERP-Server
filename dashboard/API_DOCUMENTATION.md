@@ -18,12 +18,17 @@ This API returns the aggregated metrics for the dashboard summary cards.
 | Metric | Description / Calculation |
 | :--- | :--- |
 | `total_sales` | Sum of `net_total` for all **Saved** `SalesInvoice` records in the given date range. |
+| `total_purchases` | Sum of `net_total` for all **Saved** `PurchaseInvoice` records in the given date range. |
+| `total_sales_returns` | Sum of `net_return_amount` for all **Saved** `SalesReturn` records in the given date range. |
 | `receivable` | Total `credit_balance` across all `Customer` records (Current outstanding total). |
-| `profit` | Calculated dynamically as: `(Total Sales) - (Total Purchases + Outgoing Expenses)` within the date range. |
+| `customer_advance` | Total `advance_balance` across all `Customer` records (Current outstanding total). |
+| `profit` | Calculated dynamically as: `(Total Sales - Total Sales Returns) - (Total Purchases + Outgoing Expenses)` within the date range. |
 | `cash_sales` | Sum of `net_total` for **Saved** `SalesInvoice` records where `payment_term` is **'Cash'**. |
 | `credit_sales` | Sum of `net_total` for **Saved** `SalesInvoice` records where `payment_term` is **'Credit'**. |
 | `outgoing_expense` | Sum of `amount` for all `Expense` records in the given date range. |
+| `total_expenses` | Alias for `outgoing_expense`. |
 | `supplier_payable`| Total `payable_balance` across all `Vendor` (Supplier) records (Current outstanding total). |
+| `vendor_advance` | Total `advance_balance` across all `Vendor` (Supplier) records (Current outstanding total). |
 | `supplier_paid` | Sum of `amount_paid` from all `VendorPayment` records in the given date range. |
 | `incoming_cash` | Sum of `amount_received` from all `PaymentReceived` records in the given date range. |
 

@@ -3,6 +3,7 @@ Sales module data models: customers, invoices, and line items.
 """
 
 from decimal import Decimal
+from django.core.validators import MinValueValidator
 from django.db import IntegrityError, models, transaction
 from django.utils import timezone
 from sales.base_models import SoftDeleteModel
@@ -25,8 +26,8 @@ class Customer(SoftDeleteModel):
     opening_credit = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     opening_note = models.TextField(blank=True)
     tax_number = models.CharField(max_length=50, blank=True, null=True)
-    credit_balance = models.DecimalField(max_digits=12, decimal_places=2, default=0.0)
-    advance_balance = models.DecimalField(max_digits=12, decimal_places=2, default=0.0)
+    credit_balance = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'), validators=[MinValueValidator(Decimal('0.00'))])
+    advance_balance = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'), validators=[MinValueValidator(Decimal('0.00'))])
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -35,6 +36,73 @@ class Customer(SoftDeleteModel):
 
     def __str__(self) -> str:
         return self.customer_name
+
+    def apply_payment(self, amount: Decimal):
+        """
+        Applies a payment to the customer's balance.
+        First pays down credit_balance. Leftover overflows into advance_balance.
+        Must be called within a transaction.
+        Returns a tuple: (applied_to_credit, applied_to_advance)
+        """
+        remaining = Decimal(str(amount))
+        applied_to_credit = Decimal('0.00')
+        applied_to_advance = Decimal('0.00')
+
+        if self.credit_balance > 0 and remaining > 0:
+            applied_to_credit = min(self.credit_balance, remaining)
+            self.credit_balance -= applied_to_credit
+            remaining -= applied_to_credit
+
+        if remaining > 0:
+            applied_to_advance = remaining
+            self.advance_balance += applied_to_advance
+
+        self.save(update_fields=['credit_balance', 'advance_balance'])
+        return applied_to_credit, applied_to_advance
+
+    def reverse_payment(self, applied_to_credit: Decimal, applied_to_advance: Decimal):
+        """
+        Reverses a payment by increasing credit_balance and decreasing advance_balance.
+        """
+        if applied_to_advance > 0:
+            self.advance_balance -= applied_to_advance
+        
+        if applied_to_credit > 0:
+            self.credit_balance += applied_to_credit
+            
+        self.save(update_fields=['credit_balance', 'advance_balance'])
+
+    def apply_invoice(self, amount: Decimal, is_credit: bool = True):
+        """
+        Consumes available advance to cover the invoice amount.
+        Any remaining unpaid portion increases credit_balance (if is_credit is True).
+        Returns the amount of advance consumed.
+        """
+        remaining = Decimal(str(amount))
+        consumed_advance = Decimal('0.00')
+
+        if self.advance_balance > 0 and remaining > 0:
+            consumed_advance = min(self.advance_balance, remaining)
+            self.advance_balance -= consumed_advance
+            remaining -= consumed_advance
+            
+        if remaining > 0 and is_credit:
+            self.credit_balance += remaining
+            
+        self.save(update_fields=['credit_balance', 'advance_balance'])
+        return consumed_advance
+
+    def reverse_invoice(self, balance_due: Decimal, advance_applied: Decimal, is_credit: bool = True):
+        """
+        Reverses the effects of an invoice on the customer's balances.
+        """
+        if balance_due > 0 and is_credit:
+            self.credit_balance -= balance_due
+            
+        if advance_applied > 0:
+            self.advance_balance += advance_applied
+            
+        self.save(update_fields=['credit_balance', 'advance_balance'])
 
     def save(self, *args, **kwargs):
         is_new = not self.id
@@ -134,6 +202,15 @@ class SalesInvoice(SoftDeleteModel):
     @property
     def balance_due(self):
         return (self.net_total - Decimal(str(self.paid_amount))).quantize(Decimal('0.01'))
+
+    @property
+    def total_returned_amount(self):
+        from decimal import Decimal
+        return sum((ret.net_return_amount for ret in self.returns.all() if ret.status == 'Saved'), Decimal('0.00')).quantize(Decimal('0.01'))
+
+    @property
+    def net_total_after_returns(self):
+        return (self.net_total - self.total_returned_amount).quantize(Decimal('0.01'))
 
     def save(self, *args, **kwargs):
         if not self.invoice_number:
