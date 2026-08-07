@@ -428,40 +428,58 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
     def _apply_invoice_balance_effects(self, invoice, original_paid_amount):
         """
         Applies all balance-affecting side effects for an invoice that
-        has just become 'Saved' (either created directly as Saved, or
-        transitioned from Draft to Saved via update()). Must only ever
-        be called ONCE per invoice's lifecycle — calling it twice would
-        double-apply advance consumption, credit_balance changes, and
-        create a duplicate PaymentReceived record.
+        has just become 'Saved'.
         """
         if invoice.customer:
+            customer = Customer.objects.select_for_update().get(pk=invoice.customer.pk)
+            
+            # Temporarily revert paid_amount so balance_due is pure
+            if original_paid_amount > 0:
+                invoice.paid_amount -= original_paid_amount
+                invoice.save(update_fields=['paid_amount'])
+                
             remaining_due = invoice.balance_due
-            available_advance = invoice.customer.advance_balance
-
-            if available_advance > 0 and remaining_due > 0:
-                consume_amount = min(available_advance, remaining_due)
-
+            is_credit = (invoice.payment_term == 'Credit')
+            
+            # Consume advance & add to credit balance
+            consume_amount = customer.apply_invoice(remaining_due, is_credit)
+            
+            if consume_amount > 0:
                 invoice.advance_applied = consume_amount
                 invoice.paid_amount += consume_amount
                 invoice.save(update_fields=['advance_applied', 'paid_amount'])
 
-                invoice.customer.advance_balance -= consume_amount
-                invoice.customer.save(update_fields=['advance_balance'])
+            # Process the original_paid_amount through proper PaymentReceived logic
+            if original_paid_amount > 0:
+                serializer = PaymentReceivedSerializer()
+                result = serializer._apply_payment(customer, original_paid_amount, invoice)
+                
+                PaymentReceived.objects.create(
+                    customer=customer,
+                    invoice=invoice,
+                    amount_received=original_paid_amount,
+                    balance_after=result['balance_after'],
+                    method=invoice.payment_method or 'Cash',
+                    notes=f"Auto-recorded from invoice {invoice.invoice_number}",
+                    applied_to_invoice=result['applied_to_invoice'],
+                    applied_to_credit=result['applied_to_credit'],
+                    applied_to_advance=result['applied_to_advance']
+                )
 
-        if invoice.payment_term == 'Credit' and invoice.customer:
-            invoice.customer.refresh_from_db(fields=['credit_balance'])
-            invoice.customer.credit_balance += invoice.balance_due
-            invoice.customer.save(update_fields=['credit_balance'])
-
-        if invoice.customer and original_paid_amount > 0:
-            PaymentReceived.objects.create(
-                customer=invoice.customer,
-                invoice=invoice,
-                amount_received=original_paid_amount,
-                balance_after=invoice.customer.credit_balance,
-                method=invoice.payment_method or 'Cash',
-                notes=f"Auto-recorded from invoice {invoice.invoice_number}",
-            )
+    def _reverse_invoice_balance_effects(self, invoice):
+        """
+        Reverses balance side effects when a 'Saved' invoice is trashed.
+        """
+        if invoice.customer:
+            customer = Customer.objects.select_for_update().get(pk=invoice.customer.pk)
+            is_credit = (invoice.payment_term == 'Credit')
+            balance_due = invoice.net_total - invoice.advance_applied
+            customer.reverse_invoice(balance_due, invoice.advance_applied, is_credit)
+            
+            if invoice.advance_applied > 0:
+                invoice.paid_amount -= invoice.advance_applied
+                invoice.advance_applied = Decimal('0.00')
+                invoice.save(update_fields=['paid_amount', 'advance_applied'])
 
     def create(self, validated_data: dict) -> SalesInvoice:
         items_data = validated_data.pop("items")
@@ -582,8 +600,6 @@ class PaymentReceivedSerializer(serializers.ModelSerializer):
         """Apply payment: invoice balance_due first, then credit_balance, then advance."""
         remaining = Decimal(str(amount))
         applied_to_invoice = Decimal('0')
-        applied_to_credit = Decimal('0')
-        applied_to_advance = Decimal('0')
 
         # Step 1 — pay down the specific invoice's own balance_due first,
         # capped so we never push invoice.paid_amount past its net_total
@@ -596,18 +612,7 @@ class PaymentReceivedSerializer(serializers.ModelSerializer):
                 invoice.save(update_fields=['paid_amount'])
                 remaining -= applied_to_invoice
 
-        # Step 2 — any leftover clears the customer's general credit_balance
-        if customer.credit_balance > 0 and remaining > 0:
-            applied_to_credit = min(customer.credit_balance, remaining)
-            customer.credit_balance -= applied_to_credit
-            remaining -= applied_to_credit
-
-        # Step 3 — anything still remaining is a genuine overpayment -> advance
-        if remaining > 0:
-            applied_to_advance = remaining
-            customer.advance_balance += applied_to_advance
-
-        customer.save(update_fields=['credit_balance', 'advance_balance'])
+        applied_to_credit, applied_to_advance = customer.apply_payment(remaining)
 
         return {
             'balance_after': customer.credit_balance,
@@ -618,14 +623,7 @@ class PaymentReceivedSerializer(serializers.ModelSerializer):
 
     def _reverse_payment(self, customer, invoice, applied_to_invoice, applied_to_credit, applied_to_advance):
         """Reverse a previously applied payment using the STORED split amounts."""
-        # Reverse in the exact reverse order
-        if applied_to_advance > 0:
-            customer.advance_balance -= applied_to_advance
-
-        if applied_to_credit > 0:
-            customer.credit_balance += applied_to_credit
-
-        customer.save(update_fields=['credit_balance', 'advance_balance'])
+        customer.reverse_payment(applied_to_credit, applied_to_advance)
 
         if invoice and applied_to_invoice > 0:
             invoice.paid_amount -= applied_to_invoice

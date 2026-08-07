@@ -579,15 +579,8 @@ class SalesInvoiceViewSet(viewsets.ModelViewSet):
         # FIX: Atomic transaction block
         with transaction.atomic():
             if invoice.status == 'Saved':
-                if invoice.customer and invoice.payment_term == 'Credit':
-                    invoice.customer.refresh_from_db(fields=['credit_balance'])
-                    invoice.customer.credit_balance -= invoice.balance_due
-                    invoice.customer.save(update_fields=['credit_balance'])
-
-                if invoice.customer and invoice.advance_applied > 0:
-                    invoice.customer.refresh_from_db(fields=['advance_balance'])
-                    invoice.customer.advance_balance += invoice.advance_applied
-                    invoice.customer.save(update_fields=['advance_balance'])
+                serializer = self.get_serializer()
+                serializer._reverse_invoice_balance_effects(invoice)
 
             invoice.soft_delete()
 
@@ -614,15 +607,8 @@ class SalesInvoiceViewSet(viewsets.ModelViewSet):
                 return Response({"error": "Not found in trash."}, status=drf_status.HTTP_404_NOT_FOUND)
 
             if invoice.status == 'Saved':
-                if invoice.customer and invoice.payment_term == 'Credit':
-                    invoice.customer.refresh_from_db(fields=['credit_balance'])
-                    invoice.customer.credit_balance += invoice.balance_due
-                    invoice.customer.save(update_fields=['credit_balance'])
-
-                if invoice.customer and invoice.advance_applied > 0:
-                    invoice.customer.refresh_from_db(fields=['advance_balance'])
-                    invoice.customer.advance_balance -= invoice.advance_applied
-                    invoice.customer.save(update_fields=['advance_balance'])
+                serializer = self.get_serializer()
+                serializer._apply_invoice_balance_effects(invoice, Decimal('0.00'))
 
             invoice.restore()
 

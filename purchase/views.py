@@ -496,23 +496,8 @@ class PurchaseInvoiceViewSet(PurchaseCamelCaseMixin, viewsets.ModelViewSet):
                 return Response({"error": "Not found in trash."}, status=drf_status.HTTP_404_NOT_FOUND)
 
             if invoice.status == 'Saved':
-                # Assuming original_paid_amount is just what was paid since we reversed it before
                 serializer = self.get_serializer()
-                # Actually _apply_invoice_balance_effects expects invoice and original_paid_amount.
-                # However, original paid_amount logic in creation/update takes the paid_amount directly.
-                # When restoring, the invoice's paid_amount might include advance consumption if it wasn't rolled back from invoice, 
-                # but wait, _reverse_invoice_balance_effects ONLY reversed vendor balances, not the invoice's own advance_applied/paid_amount.
-                # Let's fix that conceptually, or just recreate the logic here.
-                # In Sales, restore re-applies balances. 
-                if invoice.payment_term == 'Credit':
-                    invoice.vendor.refresh_from_db(fields=['payable_balance'])
-                    invoice.vendor.payable_balance += invoice.balance_due
-                    
-                if invoice.advance_applied > 0:
-                    invoice.vendor.refresh_from_db(fields=['advance_balance'])
-                    invoice.vendor.advance_balance -= invoice.advance_applied
-                    
-                invoice.vendor.save(update_fields=['payable_balance', 'advance_balance'])
+                serializer._apply_invoice_balance_effects(invoice, Decimal('0.00'))
 
             invoice.restore()
 

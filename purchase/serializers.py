@@ -349,8 +349,6 @@ class VendorPaymentSerializer(serializers.ModelSerializer):
         """Apply payment to invoice, payable balance, then advance balance."""
         remaining = Decimal(str(amount))
         applied_to_invoice = Decimal('0')
-        applied_to_payable = Decimal('0')
-        applied_to_advance = Decimal('0')
 
         if invoice:
             invoice.refresh_from_db(fields=['paid_amount'])
@@ -367,16 +365,7 @@ class VendorPaymentSerializer(serializers.ModelSerializer):
                 
                 remaining -= applied_to_invoice
 
-        if vendor.payable_balance > 0 and remaining > 0:
-            applied_to_payable = min(vendor.payable_balance, remaining)
-            vendor.payable_balance -= applied_to_payable
-            remaining -= applied_to_payable
-
-        if remaining > 0:
-            applied_to_advance = remaining
-            vendor.advance_balance += applied_to_advance
-
-        vendor.save(update_fields=['payable_balance', 'advance_balance'])
+        applied_to_payable, applied_to_advance = vendor.apply_payment(remaining)
 
         return {
             'balance_after': vendor.payable_balance,
@@ -387,11 +376,7 @@ class VendorPaymentSerializer(serializers.ModelSerializer):
 
     def _reverse_payment(self, vendor, invoice, applied_to_invoice, applied_to_payable, applied_to_advance):
         """Reverse payment effects."""
-        if applied_to_advance > 0:
-            vendor.advance_balance -= applied_to_advance
-
-        if applied_to_payable > 0:
-            vendor.payable_balance += applied_to_payable
+        vendor.reverse_payment(applied_to_payable, applied_to_advance)
 
         if invoice and applied_to_invoice > 0:
             invoice.paid_amount -= applied_to_invoice
@@ -401,8 +386,7 @@ class VendorPaymentSerializer(serializers.ModelSerializer):
             # payable balance (if Credit), we must restore it here.
             if invoice.payment_term == 'Credit':
                 vendor.payable_balance += applied_to_invoice
-
-        vendor.save(update_fields=['payable_balance', 'advance_balance'])
+                vendor.save(update_fields=['payable_balance'])
 
     def create(self, validated_data):
         vendor = validated_data['vendor']
@@ -594,24 +578,14 @@ class PurchaseInvoiceSerializer(serializers.ModelSerializer):
                 invoice.save(update_fields=['paid_amount'])
 
             remaining_due_before_payment = invoice.balance_due
-            available_advance = vendor.advance_balance
+            is_credit = (invoice.payment_term == 'Credit')
 
             # 2. Consume existing advance (if any) against the unpaid balance
-            if available_advance > 0 and remaining_due_before_payment > 0:
-                consume_amount = min(available_advance, remaining_due_before_payment)
+            consume_amount = vendor.apply_invoice(remaining_due_before_payment, is_credit)
 
+            if consume_amount > 0:
                 invoice.advance_applied += consume_amount
                 invoice.save(update_fields=['advance_applied'])
-
-                vendor.advance_balance -= consume_amount
-                vendor.save(update_fields=['advance_balance'])
-                invoice.vendor.advance_balance = vendor.advance_balance
-                remaining_due_before_payment -= consume_amount
-
-            # 3. Add remaining due to vendor's payable balance if on Credit
-            if invoice.payment_term == 'Credit':
-                vendor.payable_balance += remaining_due_before_payment
-                vendor.save(update_fields=['payable_balance'])
 
             # 4. Process the original_paid_amount through the proper VendorPayment logic
             if original_paid_amount > 0:
@@ -640,17 +614,16 @@ class PurchaseInvoiceSerializer(serializers.ModelSerializer):
         Reverses balance side effects when a 'Saved' invoice is trashed.
         Requires calling within transaction.atomic().
         """
-        from django.db import transaction
         if invoice.vendor:
             vendor = Vendor.objects.select_for_update().get(pk=invoice.vendor.pk)
+            is_credit = (invoice.payment_term == 'Credit')
+            balance_due = invoice.net_total - invoice.advance_applied
+            vendor.reverse_invoice(balance_due, invoice.advance_applied, is_credit)
             
-            if invoice.payment_term == 'Credit':
-                vendor.payable_balance -= invoice.balance_due
-                
             if invoice.advance_applied > 0:
-                vendor.advance_balance += invoice.advance_applied
-                
-            vendor.save(update_fields=['payable_balance', 'advance_balance'])
+                invoice.paid_amount -= invoice.advance_applied
+                invoice.advance_applied = Decimal('0.00')
+                invoice.save(update_fields=['paid_amount', 'advance_applied'])
 
     def create(self, validated_data: dict) -> PurchaseInvoice:
         from django.db import transaction
