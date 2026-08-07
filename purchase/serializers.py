@@ -291,13 +291,11 @@ class VendorPaymentSerializer(serializers.ModelSerializer):
     """Serializer for vendor payments and advances."""
 
     vendor = PurchaseInvoiceVendorRefSerializer()
-    vendor_name = serializers.CharField(source='vendor.vendor_name', read_only=True)
     invoice = serializers.SlugRelatedField(
         slug_field='invoice_number',
         queryset=PurchaseInvoice.objects.filter(is_deleted=False),
         allow_null=True, required=False
     )
-    invoice_number = serializers.CharField(source='invoice.invoice_number', read_only=True, default=None)
 
     class Meta:
         model = VendorPayment
@@ -306,9 +304,7 @@ class VendorPaymentSerializer(serializers.ModelSerializer):
             'payment_number',
             'date',
             'vendor',
-            'vendor_name',
             'invoice',
-            'invoice_number',
             'amount_paid',
             'balance_after',
             'method',
