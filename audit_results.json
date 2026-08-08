@@ -1,0 +1,27 @@
+{
+    "endpoints_tested": 20,
+    "failed_endpoints": [],
+    "passed_endpoints": [
+        "POST /api/auth/login/",
+        "GET /api/auth/me/",
+        "GET /api/settings/backup/",
+        "PUT /api/settings/backup/",
+        "POST /api/settings/backup/trigger/",
+        "POST /api/sales/customers/",
+        "GET /api/sales/customers/PR-00013/",
+        "GET /api/sales/customers/",
+        "POST /api/sales/invoices/",
+        "GET /api/sales/invoices/14/",
+        "POST /api/sales/payments/",
+        "GET /api/sales/customers/PR-00013/ledger/",
+        "POST /api/purchase/vendors/",
+        "GET /api/purchase/vendors/VN-00018/",
+        "POST /api/purchase/invoices/",
+        "POST /api/purchase/vendor-payments/",
+        "GET /api/purchase/vendors/VN-00018/ledger/",
+        "POST /api/purchase/expenses/",
+        "GET /api/purchase/expenses/",
+        "GET /api/purchase/daily-outflows/"
+    ],
+    "findings": []
+}

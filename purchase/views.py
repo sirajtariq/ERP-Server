@@ -50,7 +50,8 @@ class VendorViewSet(PurchaseCamelCaseMixin, viewsets.ModelViewSet):
     queryset = Vendor.objects.all()
     serializer_class = VendorSerializer
     permission_classes = [IsPurchaseUser, OnlyAdminCanDelete]
-    lookup_field = "vendor_id"
+    lookup_field = 'vendor_id'
+    lookup_value_regex = '[a-zA-Z0-9-]+'
     pagination_class = CustomPageNumberPagination
     filter_backends = [OrderingFilter]
     ordering_fields = "__all__"

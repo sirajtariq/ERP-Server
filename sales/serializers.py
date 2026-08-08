@@ -46,8 +46,7 @@ class CustomerListSerializer(serializers.ModelSerializer):
     #     result = obj.invoices.aggregate(total=Sum("paid_amount"))
     #     return result["total"] or Decimal('0.00')
 
-    def get_totalDue(self, obj):
-        return obj.credit_balance
+
 
 
 class CustomerInvoiceNestedSerializer(serializers.ModelSerializer):
@@ -87,7 +86,7 @@ class CustomerSerializer(serializers.ModelSerializer):
     taxNumber = serializers.CharField(source="tax_number", required=False, allow_null=True,allow_blank=True)
     creditBalance = serializers.DecimalField(source="credit_balance", max_digits=12, decimal_places=2, read_only=True)
     advanceBalance = serializers.DecimalField(source="advance_balance", max_digits=12, decimal_places=2, read_only=True)
-    totalPaid = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    totalPaid = serializers.SerializerMethodField()
     createdAt = serializers.DateTimeField(source="created_at", read_only=True)
     updatedAt = serializers.DateTimeField(source="updated_at", read_only=True)
     invoices = CustomerInvoiceNestedSerializer(many=True, read_only=True)
@@ -265,6 +264,8 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
     invoiceStatus = serializers.ChoiceField(
         source='status',
         choices=SalesInvoice.STATUS_CHOICES,
+        required=False,
+        default='Draft',
     )
     date = serializers.DateField(required=False)
     subtotal = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
@@ -323,6 +324,13 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
 
     def get_paymentStatus(self, obj):
         return compute_payment_status(obj)
+
+    def to_internal_value(self, data):
+        # Handle dict payloads for customer
+        customer = data.get('customer')
+        if isinstance(customer, dict):
+            data['customer'] = customer.get('id', customer.get('customer_id'))
+        return super().to_internal_value(data)
 
     def validate(self, attrs):
         from decimal import Decimal
@@ -593,6 +601,13 @@ class PaymentReceivedSerializer(serializers.ModelSerializer):
                 "Amount received must be greater than zero."
             )
         return value
+
+    def to_internal_value(self, data):
+        # Handle dict payloads for customer
+        customer = data.get('customer')
+        if isinstance(customer, dict):
+            data['customer'] = customer.get('id', customer.get('customer_id'))
+        return super().to_internal_value(data)
 
     def validate(self, attrs):
         invoice = attrs.get('invoice')

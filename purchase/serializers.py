@@ -31,40 +31,40 @@ def validate_vendor_match(vendor_data):
 class VendorSerializer(serializers.ModelSerializer):
     """Serializer for vendor master data."""
 
-    vendorId = serializers.CharField(source="vendor_id", read_only=True)
-    vendorName = serializers.CharField(source="vendor_name")
-    taxNumber = serializers.CharField(source="tax_number", required=False, allow_null=True, allow_blank=True)
-    openingPayable = serializers.DecimalField(source="opening_payable", max_digits=12, decimal_places=2, required=False, allow_null=True)
-    openingNote = serializers.CharField(source="opening_note", required=False, allow_blank=True)
-    payableBalance = serializers.DecimalField(source="payable_balance", max_digits=12, decimal_places=2, read_only=True)
-    advanceBalance = serializers.DecimalField(source="advance_balance", max_digits=12, decimal_places=2, read_only=True)
-    createdAt = serializers.DateTimeField(source="created_at", read_only=True)
-    updatedAt = serializers.DateTimeField(source="updated_at", read_only=True)
+    vendor_id = serializers.CharField(read_only=True)
+    vendor_name = serializers.CharField()
+    tax_number = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    opening_payable = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, allow_null=True)
+    opening_note = serializers.CharField(required=False, allow_blank=True)
+    payable_balance = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    advance_balance = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    created_at = serializers.DateTimeField(read_only=True)
+    updated_at = serializers.DateTimeField(read_only=True)
 
     class Meta:
         model = Vendor
         fields = [
             "id",
-            "vendorId",
-            "vendorName",
+            "vendor_id",
+            "vendor_name",
             "phone",
             "email",
             "address",
-            "taxNumber",
-            "openingPayable",
-            "openingNote",
-            "payableBalance",
-            "advanceBalance",
-            "createdAt",
-            "updatedAt",
+            "tax_number",
+            "opening_payable",
+            "opening_note",
+            "payable_balance",
+            "advance_balance",
+            "created_at",
+            "updated_at",
         ]
         read_only_fields = [
             "id",
-            "vendorId",
-            "payableBalance",
-            "advanceBalance",
-            "createdAt",
-            "updatedAt",
+            "vendor_id",
+            "payable_balance",
+            "advance_balance",
+            "created_at",
+            "updated_at",
         ]
 
     def validate_phone(self, value):
@@ -82,23 +82,23 @@ class VendorSerializer(serializers.ModelSerializer):
 
 
 class VendorInvoiceSummarySerializer(serializers.ModelSerializer):
-    invoiceNumber = serializers.CharField(source="invoice_number", read_only=True)
-    paymentTerm = serializers.CharField(source="payment_term", read_only=True)
+    invoice_number = serializers.CharField(read_only=True)
+    payment_term = serializers.CharField(read_only=True)
     subtotal = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
-    netTotal = serializers.DecimalField(source="net_total", max_digits=12, decimal_places=2, read_only=True)
-    balanceDue = serializers.DecimalField(source="balance_due", max_digits=12, decimal_places=2, read_only=True)
+    net_total = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    balance_due = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
 
     class Meta:
         model = PurchaseInvoice
         fields = [
             "id",
-            "invoiceNumber",
+            "invoice_number",
             "date",
-            "paymentTerm",
+            "payment_term",
             "status",
             "subtotal",
-            "netTotal",
-            "balanceDue"
+            "net_total",
+            "balance_due"
         ]
 
 
@@ -107,34 +107,34 @@ class VendorListSerializer(serializers.ModelSerializer):
     Listing serializer for Vendor.
     """
     invoices = VendorInvoiceSummarySerializer(many=True, read_only=True)
-    totalPaid = serializers.DecimalField(source="total_paid", max_digits=12, decimal_places=2, read_only=True)
-    vendorId = serializers.CharField(source="vendor_id", read_only=True)
-    vendorName = serializers.CharField(source="vendor_name", read_only=True)
-    taxNumber = serializers.CharField(source="tax_number", read_only=True)
-    openingPayable = serializers.DecimalField(source="opening_payable", max_digits=12, decimal_places=2, read_only=True)
-    openingNote = serializers.CharField(source="opening_note", read_only=True)
-    payableBalance = serializers.DecimalField(source="payable_balance", max_digits=12, decimal_places=2, read_only=True)
-    advanceBalance = serializers.DecimalField(source="advance_balance", max_digits=12, decimal_places=2, read_only=True)
-    createdAt = serializers.DateTimeField(source="created_at", read_only=True)
-    updatedAt = serializers.DateTimeField(source="updated_at", read_only=True)
+    total_paid = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    vendor_id = serializers.CharField(read_only=True)
+    vendor_name = serializers.CharField(read_only=True)
+    tax_number = serializers.CharField(read_only=True)
+    opening_payable = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    opening_note = serializers.CharField(read_only=True)
+    payable_balance = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    advance_balance = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    created_at = serializers.DateTimeField(read_only=True)
+    updated_at = serializers.DateTimeField(read_only=True)
 
     class Meta:
         model = Vendor
         fields = [
             "id",
-            "vendorId",
-            "vendorName",
+            "vendor_id",
+            "vendor_name",
             "phone",
             "email",
             "address",
-            "taxNumber",
-            "openingPayable",
-            "openingNote",
-            "payableBalance",
-            "advanceBalance",
-            "totalPaid",
-            "createdAt",
-            "updatedAt",
+            "tax_number",
+            "opening_payable",
+            "opening_note",
+            "payable_balance",
+            "advance_balance",
+            "total_paid",
+            "created_at",
+            "updated_at",
             "invoices"
         ]
 
@@ -177,7 +177,12 @@ class PurchaseInvoiceVendorRefSerializer(serializers.Serializer):
 class PurchaseInvoiceListSerializer(serializers.ModelSerializer):
     """Lightweight serializer for the invoice list table."""
 
-    vendor = PurchaseInvoiceVendorRefSerializer()
+    vendor = serializers.PrimaryKeyRelatedField(
+        queryset=Vendor.objects.all()
+    )
+    vendor_name = serializers.CharField(
+        source='vendor.vendor_name', read_only=True
+    )
     invoice_status = serializers.CharField(source='status', read_only=True)
     subtotal = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     net_total = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
@@ -198,6 +203,7 @@ class PurchaseInvoiceListSerializer(serializers.ModelSerializer):
             'net_total',
             'balance_due',
             'vendor',
+            'vendor_name',
         ]
         read_only_fields = fields
 
@@ -244,13 +250,6 @@ class ExpenseSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         # DRF passes nested serializers' data as list of dicts in attrs
         items_list = attrs.get('items')
-        
-        # In update, if items is omitted, we might keep existing items or it's not provided.
-        # But wait, typically if items is not provided in PATCH, it's None in attrs (or omitted).
-        # We need to distinguish between empty array and omitted array.
-        # However, for simplicity, if items are provided, we recompute amount. 
-        # If omitted in a partial update, we don't recompute (use existing amount).
-        # If it's a create, items might be empty.
         
         if items_list is not None and len(items_list) > 0:
             total_amount = sum((item['amount'] for item in items_list), Decimal('0.00'))
@@ -311,7 +310,12 @@ class ExpenseSerializer(serializers.ModelSerializer):
 class VendorPaymentSerializer(serializers.ModelSerializer):
     """Serializer for vendor payments and advances."""
 
-    vendor = PurchaseInvoiceVendorRefSerializer()
+    vendor = serializers.PrimaryKeyRelatedField(
+        queryset=Vendor.objects.all()
+    )
+    vendor_name = serializers.CharField(
+        source='vendor.vendor_name', read_only=True
+    )
     invoice = serializers.SlugRelatedField(
         slug_field='invoice_number',
         queryset=PurchaseInvoice.objects.filter(is_deleted=False),
@@ -325,6 +329,7 @@ class VendorPaymentSerializer(serializers.ModelSerializer):
             'payment_number',
             'date',
             'vendor',
+            'vendor_name',
             'invoice',
             'amount_paid',
             'balance_after',
@@ -343,17 +348,22 @@ class VendorPaymentSerializer(serializers.ModelSerializer):
             'applied_to_advance',
         ]
 
+    def to_internal_value(self, data):
+        # The frontend might send a nested dict instead of an integer ID.
+        # Intercept it and extract the ID before validation.
+        vendor = data.get('vendor')
+        if isinstance(vendor, dict):
+            # Extract id, ignoring other flat fields
+            data['vendor'] = vendor.get('id', vendor.get('vendor_id'))
+            
+        return super().to_internal_value(data)
+
     def validate_amount_paid(self, value):
         if value <= 0:
             raise serializers.ValidationError("Amount paid must be greater than zero.")
         return value
 
     def validate(self, attrs):
-        vendor_data = attrs.get('vendor')
-        if vendor_data:
-            resolved_vendor = validate_vendor_match(vendor_data)
-            attrs['vendor'] = resolved_vendor
-            
         invoice = attrs.get('invoice')
         vendor = attrs.get('vendor')
         if invoice and vendor and invoice.vendor_id != vendor.id:
@@ -445,7 +455,12 @@ class PurchaseInvoiceSerializer(serializers.ModelSerializer):
     Invoice serializer with nested items.
     """
     items = PurchaseItemNestedSerializer(many=True)
-    vendor = PurchaseInvoiceVendorRefSerializer()
+    vendor = serializers.PrimaryKeyRelatedField(
+        queryset=Vendor.objects.all()
+    )
+    vendor_name = serializers.CharField(
+        source='vendor.vendor_name', read_only=True
+    )
     subtotal = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     total_line_discount = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     tax_amount = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
@@ -458,6 +473,7 @@ class PurchaseInvoiceSerializer(serializers.ModelSerializer):
         fields = [
             "id",
             "vendor",
+            "vendor_name",
             "bill_number",
             "invoice_number",
             "date",
@@ -489,16 +505,18 @@ class PurchaseInvoiceSerializer(serializers.ModelSerializer):
             "balance_due",
             "payment_status",
         ]
+    def to_internal_value(self, data):
+        # Handle dict payloads for vendor
+        vendor = data.get('vendor')
+        if isinstance(vendor, dict):
+            data['vendor'] = vendor.get('id', vendor.get('vendor_id'))
+        return super().to_internal_value(data)
 
     def validate(self, attrs):
         if self.instance and self.instance.status == 'Saved':
             raise serializers.ValidationError(
                 {"status": "Saved invoices are locked and cannot be modified."}
             )
-
-        vendor_data = attrs.pop('vendor', None)
-        if vendor_data:
-            attrs['vendor'] = validate_vendor_match(vendor_data)
 
         vendor = attrs.get('vendor', self.instance.vendor if self.instance else None)
         payment_term = attrs.get('payment_term', self.instance.payment_term if self.instance else None)

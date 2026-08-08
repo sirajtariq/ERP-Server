@@ -66,11 +66,7 @@ def _invoice_payload(vendor, *, items=None, status_val="Draft",
                   "quantity": "10", "purchasePrice": "100.00",
                   "discount": "0.00"}]
     data = {
-        "vendor": {
-            "vendorId": vendor.vendor_id,
-            "vendorName": vendor.vendor_name,
-            "phone": vendor.phone or "",
-        },
+        "vendor": vendor.id,
         "billNumber": bill_number,
         "paymentTerm": payment_term,
         "paidAmount": paid_amount,
@@ -86,13 +82,8 @@ def _invoice_payload(vendor, *, items=None, status_val="Draft",
 def _payment_payload(vendor, amount, invoice=None, method="Cash", **extra):
     """Build a camelCase vendor payment create payload."""
     data = {
-        "vendor": {
-            "vendorId": vendor.vendor_id,
-            "vendorName": vendor.vendor_name,
-            "phone": vendor.phone or "",
-        },
+        "vendor": vendor.id,
         "amountPaid": str(amount),
-        "method": method,
     }
     if invoice is not None:
         data["invoice"] = invoice.invoice_number
@@ -612,7 +603,7 @@ class PurchaseInvoiceSerializerValidationTests(APITestCase):
 
     def test_nonexistent_vendor_id_returns_400(self):
         payload = _invoice_payload(self.vendor)
-        payload["vendor"]["vendorId"] = 99999
+        payload["vendor"]["id"] = 99999
         resp = self.client.post(self.url, payload, format="json")
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST,
                          "Non-existent vendorId should return 400")
@@ -939,15 +930,14 @@ class PurchaseInvoiceViewSetTests(APITestCase):
         self.assertIn("payment_status", inv_data,
                        "List must include payment_status")
 
-    def test_list_shape_has_nested_vendor(self):
+    def test_list_shape_has_flat_vendor(self):
         self._create_invoice()
         resp = self.client.get(self.url)
         inv_data = resp.data["results"][0]
-        self.assertIsInstance(inv_data["vendor"], dict,
-                              "List vendor should be a nested object")
-        for key in ["vendor_id", "vendor_name", "phone"]:
-            self.assertIn(key, inv_data["vendor"],
-                           f"List vendor object must contain '{key}'")
+        self.assertIsInstance(inv_data["vendor"], int,
+                              "List vendor should be an integer ID")
+        self.assertIn("vendor_name", inv_data,
+                       "List vendor_name must be present")
 
     def test_list_shape_no_items(self):
         self._create_invoice()
@@ -1262,7 +1252,7 @@ class VendorPaymentSerializerTests(APITestCase):
 
     def test_nonexistent_vendor_returns_400(self):
         payload = _payment_payload(self.vendor, Decimal("50.00"))
-        payload["vendor"]["vendorId"] = 99999
+        payload["vendor"]["id"] = 99999
         resp = self.client.post(self.url, payload, format="json")
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST,
                          "Non-existent vendorId in payment should return 400")
@@ -1508,10 +1498,10 @@ class VendorPaymentViewSetTests(APITestCase):
 
     # ── Response shape ───────────────────────────────────────────────
 
-    def test_response_shape_has_nested_vendor_object(self):
+    def test_response_shape_has_flat_vendor(self):
         resp = self._make_payment()
-        self.assertIsInstance(resp.data["vendor"], dict,
-                              "Response must have nested vendor object")
+        self.assertIsInstance(resp.data["vendor"], int,
+                              "Response must have an integer vendor ID")
 
     def test_response_shape_has_vendor_name_flat_field(self):
         """Per PROJECT_ANALYSIS.md line 96, vendorName IS present as a flat field

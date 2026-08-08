@@ -44,7 +44,8 @@ class CustomerViewSet(viewsets.ModelViewSet):
     queryset = Customer.objects.prefetch_related("invoices").all()
     serializer_class = CustomerSerializer
     permission_classes = [IsSalesUser, OnlyAdminCanDelete]
-    lookup_field = "customer_id"
+    lookup_field = 'customer_id'
+    lookup_value_regex = '[a-zA-Z0-9-]+'
     pagination_class = CustomPageNumberPagination
     filter_backends = [OrderingFilter]
     ordering_fields = "__all__"
