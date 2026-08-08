@@ -212,9 +212,6 @@ class CustomerViewSet(viewsets.ModelViewSet):
                 balance_before_range += Decimal(str(inv.net_total))
             for pay in prior_payments:
                 balance_before_range -= Decimal(str(pay.amount_received))
-            for inv in prior_invoices:
-                balance_before_range -= Decimal(str(inv.advance_applied))
-                balance_before_range -= Decimal(str(inv.paid_amount))
             for ret in prior_returns:
                 balance_before_range -= Decimal(str(ret.net_return_amount))
             opening_credit_for_range = balance_before_range
@@ -236,9 +233,7 @@ class CustomerViewSet(viewsets.ModelViewSet):
 
         credit_sales = sum((Decimal(str(inv.net_total)) for inv in all_invoices if inv.payment_term == "Credit"), Decimal('0.00'))
         
-        standalone_payments = sum((Decimal(str(pay.amount_received)) for pay in all_payments), Decimal('0.00'))
-        invoice_payments = sum((Decimal(str(inv.paid_amount)) for inv in all_invoices), Decimal('0.00'))
-        total_paid = standalone_payments + invoice_payments
+        total_paid = sum((Decimal(str(pay.amount_received)) for pay in all_payments), Decimal('0.00'))
         
         total_purchases = sum((Decimal(str(inv.net_total)) for inv in all_invoices), Decimal('0.00'))
         total_invoices = len(all_invoices)
@@ -286,30 +281,6 @@ class CustomerViewSet(viewsets.ModelViewSet):
                 "balance": Decimal('0.00'),
                 "_sort_ts": inv.created_at,
             })
-            if inv.advance_applied > 0:
-                ledger_rows.append({
-                    "date": inv.date.isoformat() if inv.date else None,
-                    "voucher": f"ADV-{inv.invoice_number}",
-                    "description": "Advance Applied",
-                    "referenceType": "invoice",
-                    "referenceId": inv.id,
-                    "debit": Decimal('0.00'),
-                    "credit": Decimal(str(inv.advance_applied)),
-                    "balance": Decimal('0.00'),
-                    "_sort_ts": inv.created_at,
-                })
-            if inv.paid_amount > 0:
-                ledger_rows.append({
-                    "date": inv.date.isoformat() if inv.date else None,
-                    "voucher": f"PAY-{inv.invoice_number}",
-                    "description": f"Invoice Payment - {inv.payment_term}",
-                    "referenceType": "invoice",
-                    "referenceId": inv.id,
-                    "debit": Decimal('0.00'),
-                    "credit": Decimal(str(inv.paid_amount)),
-                    "balance": Decimal('0.00'),
-                    "_sort_ts": inv.created_at,
-                })
 
         for pay in all_payments:
             description = f"Payment - {pay.invoice.invoice_number}" if pay.invoice else "General Payment"

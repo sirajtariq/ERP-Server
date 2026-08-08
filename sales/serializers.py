@@ -423,6 +423,13 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                                      f"Payment term must be 'Cash' as no new debt is created."}
                 )
 
+        # 7. Auto-Upgrade Draft Invoices on Payment
+        current_status = attrs.get('status', self.instance.status if self.instance else 'Draft')
+        if current_status == 'Draft':
+            effective_coverage = paid_amount + advance_balance
+            if paid_amount > 0 or payment_term == 'Cash' or (net_total > 0 and effective_coverage >= net_total):
+                attrs['status'] = 'Saved'
+
         return attrs
 
     def _apply_invoice_balance_effects(self, invoice, original_paid_amount):
