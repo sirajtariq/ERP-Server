@@ -302,18 +302,6 @@ class VendorViewSet(PurchaseCamelCaseMixin, viewsets.ModelViewSet):
                 "balance": Decimal('0.00'),
                 "_sort_ts": inv.created_at,
             })
-            if inv.advance_applied > 0:
-                ledger_rows.append({
-                    "date": inv.date.isoformat() if inv.date else None,
-                    "voucher": f"ADV-{inv.invoice_number}",
-                    "description": "Advance Applied",
-                    "referenceType": "invoice",
-                    "referenceId": inv.id,
-                    "debit": Decimal(str(inv.advance_applied)),
-                    "credit": Decimal('0.00'),
-                    "balance": Decimal('0.00'),
-                    "_sort_ts": inv.created_at,
-                })
 
         for pay in all_payments:
             description = f"Payment - {pay.invoice.invoice_number}" if pay.invoice else "General Payment"

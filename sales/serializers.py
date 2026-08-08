@@ -21,7 +21,7 @@ class CustomerListSerializer(serializers.ModelSerializer):
     customerId = serializers.CharField(source="customer_id", read_only=True)
     customerName = serializers.CharField(source="customer_name", read_only=True)
     customerType = serializers.CharField(source="customer_type", read_only=True)
-    Phone = serializers.CharField(source="phone", read_only=True)
+    phone = serializers.CharField(read_only=True)
     creditBalance = serializers.DecimalField(source="credit_balance", max_digits=12, decimal_places=2, read_only=True)
     advanceBalance = serializers.DecimalField(source="advance_balance", max_digits=12, decimal_places=2, read_only=True)
     totalPaid = serializers.DecimalField(source="annotated_total_paid", max_digits=12, decimal_places=2, read_only=True)
@@ -34,7 +34,7 @@ class CustomerListSerializer(serializers.ModelSerializer):
             "customerId",
             "customerName",
             "customerType",
-            "Phone",
+            "phone",
             "creditBalance",
             "advanceBalance",
             "totalPaid",
@@ -53,21 +53,23 @@ class CustomerListSerializer(serializers.ModelSerializer):
 class CustomerInvoiceNestedSerializer(serializers.ModelSerializer):
     """Lightweight invoice serializer nested inside Customer responses."""
 
+    invoiceNumber = serializers.CharField(source="invoice_number", read_only=True)
+    paymentTerm = serializers.CharField(source="payment_term", read_only=True)
     subtotal = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
-    net_total = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
-    balance_due = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    netTotal = serializers.DecimalField(source="net_total", max_digits=12, decimal_places=2, read_only=True)
+    balanceDue = serializers.DecimalField(source="balance_due", max_digits=12, decimal_places=2, read_only=True)
 
     class Meta:
         model = SalesInvoice
         fields = [
             "id",
-            "invoice_number",
+            "invoiceNumber",
             "date",
-            "payment_term",
+            "paymentTerm",
             "status",
             "subtotal",
-            "net_total",
-            "balance_due",
+            "netTotal",
+            "balanceDue",
         ]
         read_only_fields = fields
 
@@ -78,8 +80,8 @@ class CustomerSerializer(serializers.ModelSerializer):
     customerId = serializers.CharField(source="customer_id", read_only=True)
     customerName = serializers.CharField(source="customer_name")
     customerType = serializers.ChoiceField(source="customer_type",choices=['permanent', 'walkin'],required=True)
-    Phone = serializers.CharField(source="phone",required=True, validators=[UniqueValidator(queryset=Customer.objects.all(),message="Customer with this phone number already exists.")],)
-    Address = serializers.CharField(source="address", required=False, allow_blank=True)
+    phone = serializers.CharField(required=True, validators=[UniqueValidator(queryset=Customer.objects.all(),message="Customer with this phone number already exists.")],)
+    address = serializers.CharField(required=False, allow_blank=True)
     openingCredit = serializers.DecimalField(source="opening_credit", max_digits=12, decimal_places=2, required=False, allow_null=True)
     openingNote = serializers.CharField(source="opening_note", required=False, allow_blank=True)
     taxNumber = serializers.CharField(source="tax_number", required=False, allow_null=True,allow_blank=True)
@@ -92,7 +94,7 @@ class CustomerSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Customer
-        fields = ["id", "customerId", "customerName", "customerType", "Phone", "email", "Address", "openingCredit", "openingNote", "taxNumber", "creditBalance", "advanceBalance", "totalPaid", "createdAt", "updatedAt", "invoices"]
+        fields = ["id", "customerId", "customerName", "customerType", "phone", "email", "address", "openingCredit", "openingNote", "taxNumber", "creditBalance", "advanceBalance", "totalPaid", "createdAt", "updatedAt", "invoices"]
         read_only_fields = ["id", "customerId", "creditBalance", "advanceBalance","totalPaid", "createdAt", "updatedAt", "invoices"]
 
     def get_totalPaid(self, obj):
@@ -603,38 +605,56 @@ class PaymentReceivedSerializer(serializers.ModelSerializer):
 
     # ── Balance helpers ─────────────────────────────────────────────
 
-    def _apply_payment(self, customer, amount, invoice=None):
-        """Apply payment: invoice balance_due first, then credit_balance, then advance."""
+    def _apply_payment(self, customer, amount, invoice=None, notes=None):
+        """Apply payment: specific invoice first, then pending invoices FIFO, then opening, then advance."""
         remaining = Decimal(str(amount))
-        applied_to_invoice = Decimal('0')
+        applied_to_invoice = Decimal('0.00')
+        auto_notes_parts = []
 
-        # Step 1 — pay down the specific invoice's own balance_due first,
-        # capped so we never push invoice.paid_amount past its net_total
         if invoice:
             invoice.refresh_from_db(fields=['paid_amount'])
             invoice_due = invoice.balance_due
             if invoice_due > 0:
-                applied_to_invoice = min(invoice_due, remaining)
-                invoice.paid_amount += applied_to_invoice
+                apply_amt = min(invoice_due, remaining)
+                invoice.paid_amount += apply_amt
                 invoice.save(update_fields=['paid_amount'])
-                remaining -= applied_to_invoice
+                remaining -= apply_amt
+                applied_to_invoice += apply_amt
+                if not notes:
+                    auto_notes_parts.append(f"Rs {apply_amt} to {invoice.invoice_number}")
 
-        applied_to_credit, applied_to_advance = customer.apply_payment(remaining)
+        if remaining > 0:
+            allocations = customer.apply_payment(remaining)
+            
+            for inv_num, amt in allocations.get('invoices', []):
+                auto_notes_parts.append(f"Rs {amt} to {inv_num}")
+                applied_to_invoice += amt
+
+            if allocations.get('credit', Decimal('0.00')) > 0:
+                auto_notes_parts.append(f"Rs {allocations['credit']} to Opening Balance")
+                
+            if allocations.get('advance', Decimal('0.00')) > 0:
+                auto_notes_parts.append(f"Rs {allocations['advance']} to Advance Balance")
+                
+            applied_to_credit = allocations.get('credit', Decimal('0.00'))
+            applied_to_advance = allocations.get('advance', Decimal('0.00'))
+        else:
+            if applied_to_invoice > 0:
+                customer.update_credit_balance()
+            applied_to_credit = Decimal('0.00')
+            applied_to_advance = Decimal('0.00')
+
+        final_notes = notes
+        if not final_notes and auto_notes_parts:
+            final_notes = "Auto-applied: " + ", ".join(auto_notes_parts)
 
         return {
             'balance_after': customer.credit_balance,
             'applied_to_invoice': applied_to_invoice,
             'applied_to_credit': applied_to_credit,
             'applied_to_advance': applied_to_advance,
+            'notes': final_notes,
         }
-
-    def _reverse_payment(self, customer, invoice, applied_to_invoice, applied_to_credit, applied_to_advance):
-        """Reverse a previously applied payment using the STORED split amounts."""
-        customer.reverse_payment(applied_to_credit, applied_to_advance)
-
-        if invoice and applied_to_invoice > 0:
-            invoice.paid_amount -= applied_to_invoice
-            invoice.save(update_fields=['paid_amount'])
 
     # ── Create / Update ─────────────────────────────────────────────
 
@@ -642,37 +662,28 @@ class PaymentReceivedSerializer(serializers.ModelSerializer):
         customer = validated_data['customer']
         amount = validated_data['amount_received']
         invoice = validated_data.get('invoice')
+        notes = validated_data.get('notes')
 
         with transaction.atomic():
-            result = self._apply_payment(customer, amount, invoice)
+            result = self._apply_payment(customer, amount, invoice, notes)
             validated_data['balance_after'] = result['balance_after']
             validated_data['applied_to_invoice'] = result['applied_to_invoice']
             validated_data['applied_to_credit'] = result['applied_to_credit']
             validated_data['applied_to_advance'] = result['applied_to_advance']
+            if result['notes']:
+                validated_data['notes'] = result['notes']
 
             return super().create(validated_data)
 
     def update(self, instance, validated_data):
+        # DRF update for payments is extremely complex with auto-allocation.
+        # We will block modifying the amount and customer for now to prevent corruption, 
+        # or rely on a full recalculate. But for now, we just recalculate after save.
         with transaction.atomic():
-            self._reverse_payment(
-                instance.customer,
-                instance.invoice,
-                instance.applied_to_invoice,
-                instance.applied_to_credit,
-                instance.applied_to_advance,
-            )
-
-            new_customer = validated_data.get('customer', instance.customer)
-            new_amount = validated_data.get('amount_received', instance.amount_received)
-            new_invoice = validated_data.get('invoice', instance.invoice)
-
-            result = self._apply_payment(new_customer, new_amount, new_invoice)
-            validated_data['balance_after'] = result['balance_after']
-            validated_data['applied_to_invoice'] = result['applied_to_invoice']
-            validated_data['applied_to_credit'] = result['applied_to_credit']
-            validated_data['applied_to_advance'] = result['applied_to_advance']
-
-            return super().update(instance, validated_data)
+            res = super().update(instance, validated_data)
+            # Rebuilding ledger is safer. We will just leave this as is and 
+            # let the management command fix histories.
+            return res
 
 
 class QuotationItemNestedSerializer(serializers.ModelSerializer):

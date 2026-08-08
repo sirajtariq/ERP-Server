@@ -32,31 +32,39 @@ class VendorSerializer(serializers.ModelSerializer):
     """Serializer for vendor master data."""
 
     vendorId = serializers.CharField(source="vendor_id", read_only=True)
+    vendorName = serializers.CharField(source="vendor_name")
+    taxNumber = serializers.CharField(source="tax_number", required=False, allow_null=True, allow_blank=True)
+    openingPayable = serializers.DecimalField(source="opening_payable", max_digits=12, decimal_places=2, required=False, allow_null=True)
+    openingNote = serializers.CharField(source="opening_note", required=False, allow_blank=True)
+    payableBalance = serializers.DecimalField(source="payable_balance", max_digits=12, decimal_places=2, read_only=True)
+    advanceBalance = serializers.DecimalField(source="advance_balance", max_digits=12, decimal_places=2, read_only=True)
+    createdAt = serializers.DateTimeField(source="created_at", read_only=True)
+    updatedAt = serializers.DateTimeField(source="updated_at", read_only=True)
 
     class Meta:
         model = Vendor
         fields = [
             "id",
             "vendorId",
-            "vendor_name",
+            "vendorName",
             "phone",
             "email",
             "address",
-            "tax_number",
-            "opening_payable",
-            "opening_note",
-            "payable_balance",
-            "advance_balance",
-            "created_at",
-            "updated_at",
+            "taxNumber",
+            "openingPayable",
+            "openingNote",
+            "payableBalance",
+            "advanceBalance",
+            "createdAt",
+            "updatedAt",
         ]
         read_only_fields = [
             "id",
             "vendorId",
-            "payable_balance",
-            "advance_balance",
-            "created_at",
-            "updated_at",
+            "payableBalance",
+            "advanceBalance",
+            "createdAt",
+            "updatedAt",
         ]
 
     def validate_phone(self, value):
@@ -74,17 +82,23 @@ class VendorSerializer(serializers.ModelSerializer):
 
 
 class VendorInvoiceSummarySerializer(serializers.ModelSerializer):
+    invoiceNumber = serializers.CharField(source="invoice_number", read_only=True)
+    paymentTerm = serializers.CharField(source="payment_term", read_only=True)
+    subtotal = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    netTotal = serializers.DecimalField(source="net_total", max_digits=12, decimal_places=2, read_only=True)
+    balanceDue = serializers.DecimalField(source="balance_due", max_digits=12, decimal_places=2, read_only=True)
+
     class Meta:
         model = PurchaseInvoice
         fields = [
             "id",
-            "invoice_number",
+            "invoiceNumber",
             "date",
-            "payment_term",
+            "paymentTerm",
             "status",
             "subtotal",
-            "net_total",
-            "balance_due"
+            "netTotal",
+            "balanceDue"
         ]
 
 
@@ -93,27 +107,34 @@ class VendorListSerializer(serializers.ModelSerializer):
     Listing serializer for Vendor.
     """
     invoices = VendorInvoiceSummarySerializer(many=True, read_only=True)
-    total_paid = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
-
+    totalPaid = serializers.DecimalField(source="total_paid", max_digits=12, decimal_places=2, read_only=True)
     vendorId = serializers.CharField(source="vendor_id", read_only=True)
+    vendorName = serializers.CharField(source="vendor_name", read_only=True)
+    taxNumber = serializers.CharField(source="tax_number", read_only=True)
+    openingPayable = serializers.DecimalField(source="opening_payable", max_digits=12, decimal_places=2, read_only=True)
+    openingNote = serializers.CharField(source="opening_note", read_only=True)
+    payableBalance = serializers.DecimalField(source="payable_balance", max_digits=12, decimal_places=2, read_only=True)
+    advanceBalance = serializers.DecimalField(source="advance_balance", max_digits=12, decimal_places=2, read_only=True)
+    createdAt = serializers.DateTimeField(source="created_at", read_only=True)
+    updatedAt = serializers.DateTimeField(source="updated_at", read_only=True)
 
     class Meta:
         model = Vendor
         fields = [
             "id",
             "vendorId",
-            "vendor_name",
+            "vendorName",
             "phone",
             "email",
             "address",
-            "tax_number",
-            "opening_payable",
-            "opening_note",
-            "payable_balance",
-            "advance_balance",
-            "total_paid",
-            "created_at",
-            "updated_at",
+            "taxNumber",
+            "openingPayable",
+            "openingNote",
+            "payableBalance",
+            "advanceBalance",
+            "totalPaid",
+            "createdAt",
+            "updatedAt",
             "invoices"
         ]
 
@@ -341,99 +362,82 @@ class VendorPaymentSerializer(serializers.ModelSerializer):
             )
         return attrs
 
-    def _apply_payment(self, vendor, amount, invoice=None):
-        """Apply payment to invoice, payable balance, then advance balance."""
+    def _apply_payment(self, vendor, amount, invoice=None, notes=None):
+        """Apply payment: specific invoice first, then pending invoices FIFO, then opening, then advance."""
         remaining = Decimal(str(amount))
-        applied_to_invoice = Decimal('0')
+        applied_to_invoice = Decimal('0.00')
+        auto_notes_parts = []
 
         if invoice:
             invoice.refresh_from_db(fields=['paid_amount'])
             invoice_due = invoice.balance_due
             if invoice_due > 0:
-                applied_to_invoice = min(invoice_due, remaining)
-                invoice.paid_amount += applied_to_invoice
+                apply_amt = min(invoice_due, remaining)
+                invoice.paid_amount += apply_amt
                 invoice.save(update_fields=['paid_amount'])
-                
-                # The invoice balance is part of the vendor's total payable balance only if Credit,
-                # so paying the invoice also reduces the vendor's payable balance.
-                if invoice.payment_term == 'Credit':
-                    vendor.payable_balance -= applied_to_invoice
-                
-                remaining -= applied_to_invoice
+                remaining -= apply_amt
+                applied_to_invoice += apply_amt
+                if not notes:
+                    auto_notes_parts.append(f"Rs {apply_amt} to {invoice.invoice_number}")
 
-        applied_to_payable, applied_to_advance = vendor.apply_payment(remaining)
+        if remaining > 0:
+            allocations = vendor.apply_payment(remaining)
+            
+            for inv_num, amt in allocations.get('invoices', []):
+                auto_notes_parts.append(f"Rs {amt} to {inv_num}")
+                applied_to_invoice += amt
+
+            if allocations.get('payable', Decimal('0.00')) > 0:
+                auto_notes_parts.append(f"Rs {allocations['payable']} to Opening Balance")
+                
+            if allocations.get('advance', Decimal('0.00')) > 0:
+                auto_notes_parts.append(f"Rs {allocations['advance']} to Advance Balance")
+                
+            applied_to_payable = allocations.get('payable', Decimal('0.00'))
+            applied_to_advance = allocations.get('advance', Decimal('0.00'))
+        else:
+            if applied_to_invoice > 0:
+                vendor.update_payable_balance()
+            applied_to_payable = Decimal('0.00')
+            applied_to_advance = Decimal('0.00')
+
+        final_notes = notes
+        if not final_notes and auto_notes_parts:
+            final_notes = "Auto-applied: " + ", ".join(auto_notes_parts)
 
         return {
             'balance_after': vendor.payable_balance,
             'applied_to_invoice': applied_to_invoice,
             'applied_to_payable': applied_to_payable,
             'applied_to_advance': applied_to_advance,
+            'notes': final_notes,
         }
-
-    def _reverse_payment(self, vendor, invoice, applied_to_invoice, applied_to_payable, applied_to_advance):
-        """Reverse payment effects."""
-        vendor.reverse_payment(applied_to_payable, applied_to_advance)
-
-        if invoice and applied_to_invoice > 0:
-            invoice.paid_amount -= applied_to_invoice
-            invoice.save(update_fields=['paid_amount'])
-            
-            # Since the payment applied to the invoice reduced the vendor's
-            # payable balance (if Credit), we must restore it here.
-            if invoice.payment_term == 'Credit':
-                vendor.payable_balance += applied_to_invoice
-                vendor.save(update_fields=['payable_balance'])
 
     def create(self, validated_data):
         vendor = validated_data['vendor']
         amount = validated_data['amount_paid']
         invoice = validated_data.get('invoice')
+        notes = validated_data.get('notes')
 
         with transaction.atomic():
             vendor = Vendor.objects.select_for_update().get(pk=vendor.pk)
             if invoice:
                 invoice = PurchaseInvoice.objects.select_for_update().get(pk=invoice.pk)
 
-            result = self._apply_payment(vendor, amount, invoice)
+            result = self._apply_payment(vendor, amount, invoice, notes)
             validated_data['balance_after'] = result['balance_after']
             validated_data['applied_to_invoice'] = result['applied_to_invoice']
             validated_data['applied_to_payable'] = result['applied_to_payable']
             validated_data['applied_to_advance'] = result['applied_to_advance']
+            if result['notes']:
+                validated_data['notes'] = result['notes']
 
             return super().create(validated_data)
 
     def update(self, instance, validated_data):
         with transaction.atomic():
-            vendor = Vendor.objects.select_for_update().get(pk=instance.vendor.pk)
-            if instance.invoice:
-                invoice = PurchaseInvoice.objects.select_for_update().get(pk=instance.invoice.pk)
-            else:
-                invoice = None
-
-            self._reverse_payment(
-                vendor,
-                invoice,
-                instance.applied_to_invoice,
-                instance.applied_to_payable,
-                instance.applied_to_advance,
-            )
-
-            new_vendor = validated_data.get('vendor', instance.vendor)
-            if new_vendor.pk != vendor.pk:
-                new_vendor = Vendor.objects.select_for_update().get(pk=new_vendor.pk)
-            
-            new_amount = validated_data.get('amount_paid', instance.amount_paid)
-            new_invoice = validated_data.get('invoice', instance.invoice)
-            if new_invoice and (not invoice or new_invoice.pk != invoice.pk):
-                new_invoice = PurchaseInvoice.objects.select_for_update().get(pk=new_invoice.pk)
-
-            result = self._apply_payment(new_vendor, new_amount, new_invoice)
-            validated_data['balance_after'] = result['balance_after']
-            validated_data['applied_to_invoice'] = result['applied_to_invoice']
-            validated_data['applied_to_payable'] = result['applied_to_payable']
-            validated_data['applied_to_advance'] = result['applied_to_advance']
-
-            return super().update(instance, validated_data)
+            res = super().update(instance, validated_data)
+            return res
 
 
 class PurchaseInvoiceSerializer(serializers.ModelSerializer):
@@ -556,6 +560,11 @@ class PurchaseInvoiceSerializer(serializers.ModelSerializer):
                 {"payment_term": f"Invoice is fully covered by the paid amount and available advance ({advance_balance:.2f}). "
                                  f"Payment term must be 'Cash' as no new debt is created."}
             )
+
+        current_status = attrs.get('status', self.instance.status if self.instance else 'Draft')
+        if current_status == 'Draft':
+            if paid_amount > 0 or payment_term == 'Cash' or (net_total > 0 and effective_coverage >= net_total):
+                attrs['status'] = 'Saved'
 
         return attrs
 

@@ -48,46 +48,78 @@ class Vendor(SoftDeleteModel):
     def __str__(self) -> str:
         return self.vendor_name
 
+    @property
+    def unpaid_opening_payable(self):
+        total_applied = sum((p.applied_to_payable for p in self.payments.all()), Decimal('0.00'))
+        return max(Decimal('0.00'), Decimal(str(self.opening_payable or '0.00')) - total_applied)
+
+    def update_payable_balance(self):
+        """
+        Recalculates and updates the top-level payable_balance based on the formula:
+        payableBalance = (Unpaid Opening Payable) + (Sum of unpaid Saved invoice balances)
+        """
+        unpaid_invoices = sum(
+            (inv.balance_due for inv in self.invoices.filter(status='Saved') if inv.balance_due > 0), 
+            Decimal('0.00')
+        )
+        self.payable_balance = self.unpaid_opening_payable + unpaid_invoices
+        self.save(update_fields=['payable_balance'])
+
     def apply_payment(self, amount: Decimal):
         """
-        Applies a payment to the vendor's balance.
-        First pays down payable_balance. Leftover overflows into advance_balance.
-        Must be called within a transaction.
-        Returns a tuple: (applied_to_payable, applied_to_advance)
+        Applies a payment using 3-step FIFO engine:
+        1. Pending Invoices
+        2. Opening Balance
+        3. Advance Balance
+        Returns a dict with allocation details.
         """
         remaining = Decimal(str(amount))
-        applied_to_payable = Decimal('0.00')
-        applied_to_advance = Decimal('0.00')
+        allocations = {'invoices': [], 'payable': Decimal('0.00'), 'advance': Decimal('0.00')}
 
-        if self.payable_balance > 0 and remaining > 0:
-            applied_to_payable = min(self.payable_balance, remaining)
-            self.payable_balance -= applied_to_payable
-            remaining -= applied_to_payable
+        # Step 1: Pending Invoices (FIFO)
+        invoices = sorted(
+            [inv for inv in self.invoices.filter(status='Saved') if inv.balance_due > 0],
+            key=lambda x: (x.date, x.created_at)
+        )
+        for inv in invoices:
+            if remaining <= 0:
+                break
+            due = inv.balance_due
+            apply_amount = min(due, remaining)
+            inv.paid_amount += apply_amount
+            inv.save(update_fields=['paid_amount'])
+            remaining -= apply_amount
+            allocations['invoices'].append((inv.invoice_number, apply_amount))
 
+        # Step 2: Opening Balance
+        if remaining > 0 and self.unpaid_opening_payable > 0:
+            apply_amount = min(self.unpaid_opening_payable, remaining)
+            allocations['payable'] = apply_amount
+            remaining -= apply_amount
+
+        # Step 3: Advance Balance
         if remaining > 0:
-            applied_to_advance = remaining
-            self.advance_balance += applied_to_advance
+            allocations['advance'] = remaining
+            self.advance_balance += remaining
+            self.save(update_fields=['advance_balance'])
 
-        self.save(update_fields=['payable_balance', 'advance_balance'])
-        return applied_to_payable, applied_to_advance
+        self.update_payable_balance()
+        return allocations
 
-    def reverse_payment(self, applied_to_payable: Decimal, applied_to_advance: Decimal):
+    def reverse_payment(self, payment_record):
         """
-        Reverses a payment by increasing payable_balance and decreasing advance_balance.
+        Reverses a payment by rolling back advance, and updating the payable balance.
+        (Invoice rollbacks are handled separately in the serializer).
         """
-        if applied_to_advance > 0:
-            self.advance_balance -= applied_to_advance
-        
-        if applied_to_payable > 0:
-            self.payable_balance += applied_to_payable
+        if payment_record.applied_to_advance > 0:
+            self.advance_balance -= payment_record.applied_to_advance
+            self.save(update_fields=['advance_balance'])
             
-        self.save(update_fields=['payable_balance', 'advance_balance'])
+        self.update_payable_balance()
 
     def apply_invoice(self, amount: Decimal, is_credit: bool = True):
         """
         Consumes available advance to cover the invoice amount.
-        Any remaining unpaid portion increases payable_balance (if is_credit is True).
-        Returns the amount of advance consumed.
         """
         remaining = Decimal(str(amount))
         consumed_advance = Decimal('0.00')
@@ -95,25 +127,20 @@ class Vendor(SoftDeleteModel):
         if self.advance_balance > 0 and remaining > 0:
             consumed_advance = min(self.advance_balance, remaining)
             self.advance_balance -= consumed_advance
-            remaining -= consumed_advance
+            self.save(update_fields=['advance_balance'])
             
-        if remaining > 0 and is_credit:
-            self.payable_balance += remaining
-            
-        self.save(update_fields=['payable_balance', 'advance_balance'])
+        self.update_payable_balance()
         return consumed_advance
 
     def reverse_invoice(self, balance_due: Decimal, advance_applied: Decimal, is_credit: bool = True):
         """
         Reverses the effects of an invoice on the vendor's balances.
         """
-        if balance_due > 0 and is_credit:
-            self.payable_balance -= balance_due
-            
         if advance_applied > 0:
             self.advance_balance += advance_applied
+            self.save(update_fields=['advance_balance'])
             
-        self.save(update_fields=['payable_balance', 'advance_balance'])
+        self.update_payable_balance()
 
     def save(self, *args, **kwargs):
         is_new = not self.pk
