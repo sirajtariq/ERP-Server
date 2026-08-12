@@ -37,80 +37,83 @@ class Customer(SoftDeleteModel):
     def __str__(self) -> str:
         return self.customer_name
 
-    @property
-    def unpaid_opening_credit(self):
-        total_applied = sum((p.applied_to_credit for p in self.payments.all()), Decimal('0.00'))
-        return max(Decimal('0.00'), Decimal(str(self.opening_credit or '0.00')) - total_applied)
+    def get_calculated_balances(self):
+        """Returns current credit_balance and advance_balance."""
+        return self.credit_balance, self.advance_balance
 
-    def update_credit_balance(self):
+    def recalculate_balances(self):
         """
-        Recalculates and updates the top-level credit_balance based on the formula:
-        creditBalance = (Unpaid Opening Credit) + (Sum of unpaid Saved invoice balances)
+        Recalculates credit_balance and advance_balance taking into account:
+        - Active invoices net_total_after_returns
+        - Total payments received
+        - Cash refunds issued (must be subtracted from retained cash)
+        - Opening credit
         """
-        unpaid_invoices = sum(
-            (inv.balance_due for inv in self.invoices.filter(status='Saved') if inv.balance_due > 0), 
+        from decimal import Decimal
+
+        opening = Decimal(str(self.opening_credit or '0.00'))
+
+        # 1. Sum of net_total_after_returns for active saved invoices
+        inv_sum = sum((inv.net_total_after_returns for inv in self.invoices.filter(status='Saved')), Decimal('0.00'))
+
+        # 2. Total Payments Received
+        pay_sum = sum((p.amount_received for p in self.payments.all()), Decimal('0.00'))
+
+        # 3. Cash Refunds Issued (Money returned to customer physically)
+        cash_refunds = sum(
+            (r.net_return_amount for r in self.returns.filter(status='Saved', refund_type='CASH')),
             Decimal('0.00')
         )
-        self.credit_balance = self.unpaid_opening_credit + unpaid_invoices
-        self.save(update_fields=['credit_balance'])
+
+        # Actual retained cash with us
+        retained_cash = pay_sum - cash_refunds
+
+        # Total net liability
+        total_debts = opening + inv_sum
+
+        net_balance = total_debts - retained_cash
+
+        if net_balance >= Decimal('0.00'):
+            new_credit = net_balance
+            new_advance = Decimal('0.00')
+        else:
+            new_credit = Decimal('0.00')
+            new_advance = abs(net_balance)
+
+        self.credit_balance = new_credit
+        self.advance_balance = new_advance
+        self.save(update_fields=['credit_balance', 'advance_balance'])
+
+        return self.credit_balance, self.advance_balance
 
     def apply_payment(self, amount: Decimal):
         """
-        Applies a payment using 3-step FIFO engine:
-        1. Pending Invoices
-        2. Opening Balance
-        3. Advance Balance
-        Returns a dict with allocation details.
+        Leftover overflows directly into advance_balance.
+        Must be called within a transaction.
+        Returns a tuple: (applied_to_credit, applied_to_advance)
         """
         remaining = Decimal(str(amount))
-        allocations = {'invoices': [], 'credit': Decimal('0.00'), 'advance': Decimal('0.00')}
+        applied_to_credit = Decimal('0.00')
+        applied_to_advance = remaining
 
-        # Step 1: Pending Invoices (FIFO)
-        invoices = sorted(
-            [inv for inv in self.invoices.filter(status='Saved') if inv.balance_due > 0],
-            key=lambda x: (x.date, x.created_at)
-        )
-        for inv in invoices:
-            if remaining <= 0:
-                break
-            due = inv.balance_due
-            apply_amount = min(due, remaining)
-            inv.paid_amount += apply_amount
-            inv.save(update_fields=['paid_amount'])
-            remaining -= apply_amount
-            allocations['invoices'].append((inv.invoice_number, apply_amount))
-
-        # Step 2: Opening Balance
-        if remaining > 0 and self.unpaid_opening_credit > 0:
-            apply_amount = min(self.unpaid_opening_credit, remaining)
-            allocations['credit'] = apply_amount
-            remaining -= apply_amount
-
-        # Step 3: Advance Balance
         if remaining > 0:
-            allocations['advance'] = remaining
-            self.advance_balance += remaining
+            self.advance_balance += applied_to_advance
             self.save(update_fields=['advance_balance'])
 
-        self.update_credit_balance()
-        return allocations
+        return applied_to_credit, applied_to_advance
 
-    def reverse_payment(self, payment_record):
+    def reverse_payment(self, applied_to_credit: Decimal, applied_to_advance: Decimal):
         """
-        Reverses a payment by rolling back invoice paid amounts, advance, and credit.
+        Reverses a payment by decreasing advance_balance.
         """
-        if payment_record.applied_to_advance > 0:
-            self.advance_balance -= payment_record.applied_to_advance
+        if applied_to_advance > 0:
+            self.advance_balance -= applied_to_advance
             self.save(update_fields=['advance_balance'])
-            
-        # Reverse invoices if this payment was specifically linked to one
-        # or if it was auto-allocated (handled in serializer via generic reversal if needed).
-        # Actually, if we just recalculate balances from scratch, it's safer.
-        self.update_credit_balance()
 
     def apply_invoice(self, amount: Decimal, is_credit: bool = True):
         """
         Consumes available advance to cover the invoice amount.
+        Returns the amount of advance consumed.
         """
         remaining = Decimal(str(amount))
         consumed_advance = Decimal('0.00')
@@ -120,7 +123,6 @@ class Customer(SoftDeleteModel):
             self.advance_balance -= consumed_advance
             self.save(update_fields=['advance_balance'])
             
-        self.update_credit_balance()
         return consumed_advance
 
     def reverse_invoice(self, balance_due: Decimal, advance_applied: Decimal, is_credit: bool = True):
@@ -130,8 +132,6 @@ class Customer(SoftDeleteModel):
         if advance_applied > 0:
             self.advance_balance += advance_applied
             self.save(update_fields=['advance_balance'])
-            
-        self.update_credit_balance()
 
     def save(self, *args, **kwargs):
         is_new = not self.id
@@ -229,8 +229,51 @@ class SalesInvoice(SoftDeleteModel):
         return ((self.subtotal - deducted_invoice_discount) + self.tax_amount).quantize(Decimal('0.01'))
 
     @property
+    def paid(self):
+        """
+        Dynamically calculates the actual paid amount strictly based on:
+        a) Direct payments linked to this invoice
+        b) Unallocated general advances consumed sequentially (FIFO) by older unpaid invoices.
+        """
+        from sales.models import PaymentReceived
+        
+        direct_payments = sum((p.amount_received for p in self.payments.all()), Decimal('0.00'))
+        
+        if not self.customer:
+            return min(self.net_total_after_returns, direct_payments).quantize(Decimal('0.01'))
+            
+        general_payments = PaymentReceived.objects.filter(
+            customer=self.customer, invoice__isnull=True
+        ).order_by('date', 'id')
+        total_advance = sum((p.amount_received for p in general_payments), Decimal('0.00'))
+        
+        older_invoices = self.customer.invoices.filter(
+            status='Saved', id__lt=self.id
+        ).order_by('date', 'id')
+        
+        for inv in older_invoices:
+            if total_advance <= Decimal('0.00'):
+                break
+            inv_direct = sum((p.amount_received for p in inv.payments.all()), Decimal('0.00'))
+            inv_need = inv.net_total_after_returns - inv_direct
+            if inv_need > Decimal('0.00'):
+                consumed = min(total_advance, inv_need)
+                total_advance -= consumed
+                
+        this_need = self.net_total_after_returns - direct_payments
+        consumed_here = Decimal('0.00')
+        if this_need > Decimal('0.00') and total_advance > Decimal('0.00'):
+            consumed_here = min(total_advance, this_need)
+            
+        total_paid = direct_payments + consumed_here
+        return min(self.net_total_after_returns, total_paid).quantize(Decimal('0.01'))
+
+    @property
     def balance_due(self):
-        return (self.net_total - Decimal(str(self.paid_amount))).quantize(Decimal('0.01'))
+        net_after_returns = self.net_total_after_returns
+        paid = self.paid
+        pending = max(Decimal('0.00'), net_after_returns - paid)
+        return pending.quantize(Decimal('0.01'))
 
     @property
     def total_returned_amount(self):
@@ -274,6 +317,15 @@ class SalesInvoice(SoftDeleteModel):
                         raise
         else:
             super().save(*args, **kwargs)
+
+        if hasattr(self, 'customer') and self.customer:
+            self.customer.recalculate_balances()
+
+    def delete(self, *args, **kwargs):
+        cust = self.customer if hasattr(self, 'customer') else None
+        super().delete(*args, **kwargs)
+        if cust:
+            cust.recalculate_balances()
 
 
 class SalesItem(models.Model):
@@ -358,6 +410,14 @@ class PaymentReceived(SoftDeleteModel):
                 self.receipt_number = f'{prefix}{new_seq:05d}'
 
         super().save(*args, **kwargs)
+        if hasattr(self, 'customer') and self.customer:
+            self.customer.recalculate_balances()
+
+    def delete(self, *args, **kwargs):
+        cust = self.customer if hasattr(self, 'customer') else None
+        super().delete(*args, **kwargs)
+        if cust:
+            cust.recalculate_balances()
 
     def __str__(self) -> str:
         return f"{self.receipt_number} — {self.customer}"
@@ -579,6 +639,15 @@ class SalesReturn(SoftDeleteModel):
                         raise
         else:
             super().save(*args, **kwargs)
+
+        if hasattr(self, 'customer') and self.customer:
+            self.customer.recalculate_balances()
+
+    def delete(self, *args, **kwargs):
+        cust = self.customer if hasattr(self, 'customer') else None
+        super().delete(*args, **kwargs)
+        if cust:
+            cust.recalculate_balances()
 
     def __str__(self) -> str:
         return self.return_number

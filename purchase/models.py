@@ -45,82 +45,36 @@ class Vendor(SoftDeleteModel):
     class Meta:
         ordering = ["-created_at"]
 
+    def recalculate_balances(self):
+        from decimal import Decimal
+        sum_balance = sum((inv.balance_due for inv in self.invoices.filter(is_deleted=False, status='Saved')), Decimal('0.00'))
+        opening = Decimal(str(self.opening_payable or '0.00'))
+        new_payable = max(Decimal('0.00'), sum_balance + opening - self.advance_balance)
+        if self.payable_balance != new_payable:
+            self.payable_balance = new_payable
+            self.save(update_fields=['payable_balance'])
+        return self.payable_balance, self.advance_balance
+
     def __str__(self) -> str:
         return self.vendor_name
 
-    @property
-    def unpaid_opening_payable(self):
-        total_applied = sum((p.applied_to_payable for p in self.payments.all()), Decimal('0.00'))
-        return max(Decimal('0.00'), Decimal(str(self.opening_payable or '0.00')) - total_applied)
-
-    def update_payable_balance(self):
-        """
-        Recalculates and updates the top-level payable_balance based on the formula:
-        payableBalance = (Unpaid Opening Payable) + (Sum of unpaid Saved invoice balances)
-        """
-        unpaid_invoices = sum(
-            (inv.balance_due for inv in self.invoices.filter(status='Saved') if inv.balance_due > 0), 
-            Decimal('0.00')
-        )
-        self.payable_balance = self.unpaid_opening_payable + unpaid_invoices
-        self.save(update_fields=['payable_balance'])
-
     def apply_payment(self, amount: Decimal):
-        """
-        Applies a payment using 3-step FIFO engine:
-        1. Pending Invoices
-        2. Opening Balance
-        3. Advance Balance
-        Returns a dict with allocation details.
-        """
         remaining = Decimal(str(amount))
-        allocations = {'invoices': [], 'payable': Decimal('0.00'), 'advance': Decimal('0.00')}
+        applied_to_payable = Decimal('0.00')
+        applied_to_advance = remaining
 
-        # Step 1: Pending Invoices (FIFO)
-        invoices = sorted(
-            [inv for inv in self.invoices.filter(status='Saved') if inv.balance_due > 0],
-            key=lambda x: (x.date, x.created_at)
-        )
-        for inv in invoices:
-            if remaining <= 0:
-                break
-            due = inv.balance_due
-            apply_amount = min(due, remaining)
-            inv.paid_amount += apply_amount
-            inv.save(update_fields=['paid_amount'])
-            remaining -= apply_amount
-            allocations['invoices'].append((inv.invoice_number, apply_amount))
-
-        # Step 2: Opening Balance
-        if remaining > 0 and self.unpaid_opening_payable > 0:
-            apply_amount = min(self.unpaid_opening_payable, remaining)
-            allocations['payable'] = apply_amount
-            remaining -= apply_amount
-
-        # Step 3: Advance Balance
         if remaining > 0:
-            allocations['advance'] = remaining
-            self.advance_balance += remaining
+            self.advance_balance += applied_to_advance
             self.save(update_fields=['advance_balance'])
 
-        self.update_payable_balance()
-        return allocations
+        return applied_to_payable, applied_to_advance
 
-    def reverse_payment(self, payment_record):
-        """
-        Reverses a payment by rolling back advance, and updating the payable balance.
-        (Invoice rollbacks are handled separately in the serializer).
-        """
-        if payment_record.applied_to_advance > 0:
-            self.advance_balance -= payment_record.applied_to_advance
+    def reverse_payment(self, applied_to_payable: Decimal, applied_to_advance: Decimal):
+        if applied_to_advance > 0:
+            self.advance_balance -= applied_to_advance
             self.save(update_fields=['advance_balance'])
-            
-        self.update_payable_balance()
 
     def apply_invoice(self, amount: Decimal, is_credit: bool = True):
-        """
-        Consumes available advance to cover the invoice amount.
-        """
         remaining = Decimal(str(amount))
         consumed_advance = Decimal('0.00')
 
@@ -129,18 +83,14 @@ class Vendor(SoftDeleteModel):
             self.advance_balance -= consumed_advance
             self.save(update_fields=['advance_balance'])
             
-        self.update_payable_balance()
         return consumed_advance
 
     def reverse_invoice(self, balance_due: Decimal, advance_applied: Decimal, is_credit: bool = True):
-        """
-        Reverses the effects of an invoice on the vendor's balances.
-        """
         if advance_applied > 0:
             self.advance_balance += advance_applied
             self.save(update_fields=['advance_balance'])
             
-        self.update_payable_balance()
+        self.save(update_fields=['payable_balance', 'advance_balance'])
 
     def save(self, *args, **kwargs):
         is_new = not self.pk
@@ -279,6 +229,15 @@ class PurchaseInvoice(SoftDeleteModel):
                         raise
         else:
             super().save(*args, **kwargs)
+            
+        if hasattr(self, 'vendor') and self.vendor:
+            self.vendor.recalculate_balances()
+
+    def delete(self, *args, **kwargs):
+        vendor = self.vendor if hasattr(self, 'vendor') else None
+        super().delete(*args, **kwargs)
+        if vendor:
+            vendor.recalculate_balances()
 
     def __str__(self) -> str:
         return f"{self.invoice_number} ({self.vendor.vendor_name})"
@@ -307,6 +266,17 @@ class PurchaseItem(models.Model):
 
     def __str__(self) -> str:
         return f"{self.product_name} x{self.quantity}"
+
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+        if hasattr(self, 'invoice') and self.invoice and hasattr(self.invoice, 'vendor') and self.invoice.vendor:
+            self.invoice.vendor.recalculate_balances()
+
+    def delete(self, *args, **kwargs):
+        vendor = self.invoice.vendor if hasattr(self, 'invoice') and self.invoice and hasattr(self.invoice, 'vendor') and self.invoice.vendor else None
+        super().delete(*args, **kwargs)
+        if vendor:
+            vendor.recalculate_balances()
 
 
 class VendorPayment(SoftDeleteModel):
@@ -360,6 +330,15 @@ class VendorPayment(SoftDeleteModel):
                         raise
         else:
             super().save(*args, **kwargs)
+            
+        if hasattr(self, 'vendor') and self.vendor:
+            self.vendor.recalculate_balances()
+
+    def delete(self, *args, **kwargs):
+        vendor = self.vendor if hasattr(self, 'vendor') else None
+        super().delete(*args, **kwargs)
+        if vendor:
+            vendor.recalculate_balances()
 
     def __str__(self) -> str:
         return f"{self.payment_number} — {self.vendor}"

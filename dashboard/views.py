@@ -77,12 +77,17 @@ class DashboardCardsAPIView(APIView):
 
         supplier_paid = vendor_payment_qs.aggregate(total=Sum('amount_paid'))['total'] or Decimal('0.00')
 
-        # Receivable & Payable (Current total balance, irrespective of dates)
-        receivable = Customer.objects.aggregate(total=Sum('credit_balance'))['total'] or Decimal('0.00')
-        customer_advance = Customer.objects.aggregate(total=Sum('advance_balance'))['total'] or Decimal('0.00')
+        # Receivable & Payable (Current live total balance across active customers/vendors)
+        active_customers = Customer.objects.filter(is_deleted=False)
+        for customer in active_customers:
+            customer.recalculate_balances()
+
+        receivable = active_customers.aggregate(total=Sum('credit_balance'))['total'] or Decimal('0.00')
+        customer_advance = active_customers.aggregate(total=Sum('advance_balance'))['total'] or Decimal('0.00')
         
-        supplier_payable = Vendor.objects.aggregate(total=Sum('payable_balance'))['total'] or Decimal('0.00')
-        vendor_advance = Vendor.objects.aggregate(total=Sum('advance_balance'))['total'] or Decimal('0.00')
+        active_vendors = Vendor.objects.filter(is_deleted=False)
+        supplier_payable = active_vendors.aggregate(total=Sum('payable_balance'))['total'] or Decimal('0.00')
+        vendor_advance = active_vendors.aggregate(total=Sum('advance_balance'))['total'] or Decimal('0.00')
 
         return Response({
             'total_sales': float(total_sales),

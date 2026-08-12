@@ -50,8 +50,7 @@ class VendorViewSet(PurchaseCamelCaseMixin, viewsets.ModelViewSet):
     queryset = Vendor.objects.all()
     serializer_class = VendorSerializer
     permission_classes = [IsPurchaseUser, OnlyAdminCanDelete]
-    lookup_field = 'vendor_id'
-    lookup_value_regex = '[a-zA-Z0-9-]+'
+    lookup_field = "vendor_id"
     pagination_class = CustomPageNumberPagination
     filter_backends = [OrderingFilter]
     ordering_fields = "__all__"
@@ -303,6 +302,18 @@ class VendorViewSet(PurchaseCamelCaseMixin, viewsets.ModelViewSet):
                 "balance": Decimal('0.00'),
                 "_sort_ts": inv.created_at,
             })
+            if inv.advance_applied > 0:
+                ledger_rows.append({
+                    "date": inv.date.isoformat() if inv.date else None,
+                    "voucher": f"ADV-{inv.invoice_number}",
+                    "description": "Advance Applied",
+                    "referenceType": "invoice",
+                    "referenceId": inv.id,
+                    "debit": Decimal(str(inv.advance_applied)),
+                    "credit": Decimal('0.00'),
+                    "balance": Decimal('0.00'),
+                    "_sort_ts": inv.created_at,
+                })
 
         for pay in all_payments:
             description = f"Payment - {pay.invoice.invoice_number}" if pay.invoice else "General Payment"
@@ -456,6 +467,12 @@ class PurchaseInvoiceViewSet(PurchaseCamelCaseMixin, viewsets.ModelViewSet):
     @swagger_auto_schema(operation_description=PURCHASE_PERMISSION_NOTE)
     def destroy(self, request, *args, **kwargs):
         invoice = self.get_object()
+
+        if invoice.paid_amount > 0 or invoice.advance_applied > 0 or invoice.payments.exists():
+            return Response(
+                {"error": "Cannot revert or delete Purchase Invoice because payments/advances are attached to it."},
+                status=drf_status.HTTP_400_BAD_REQUEST
+            )
 
         with transaction.atomic():
             if invoice.status == 'Saved':
@@ -634,12 +651,29 @@ class VendorPaymentViewSet(PurchaseCamelCaseMixin, viewsets.ModelViewSet):
                 return Response({"error": "Not found in trash."}, status=drf_status.HTTP_404_NOT_FOUND)
 
             serializer = self.get_serializer()
-            serializer._apply_payment(
+            result = serializer._apply_payment(
                 payment.vendor,
                 payment.amount_paid,
                 payment.invoice
             )
+            
+            payment.applied_to_invoice = result.get('applied_to_invoice', Decimal('0.00'))
+            payment.applied_to_credit = result.get('applied_to_credit', Decimal('0.00'))
+            payment.applied_to_advance = result.get('applied_to_advance', Decimal('0.00'))
+            
             payment.restore()
+            
+            if payment.vendor:
+                payment.vendor.recalculate_balances()
+                payment.vendor.refresh_from_db()
+                payment.balance_after = payment.vendor.payable_balance
+            else:
+                payment.balance_after = Decimal('0.00')
+
+            payment.save(update_fields=[
+                'balance_after', 'applied_to_invoice',
+                'applied_to_credit', 'applied_to_advance',
+            ])
 
         return Response({"message": "Payment restored, balance re-applied."})
 

@@ -66,7 +66,11 @@ def _invoice_payload(vendor, *, items=None, status_val="Draft",
                   "quantity": "10", "purchasePrice": "100.00",
                   "discount": "0.00"}]
     data = {
-        "vendor": vendor.id,
+        "vendor": {
+            "vendorId": vendor.vendor_id,
+            "vendorName": vendor.vendor_name,
+            "phone": vendor.phone or "",
+        },
         "billNumber": bill_number,
         "paymentTerm": payment_term,
         "paidAmount": paid_amount,
@@ -82,8 +86,13 @@ def _invoice_payload(vendor, *, items=None, status_val="Draft",
 def _payment_payload(vendor, amount, invoice=None, method="Cash", **extra):
     """Build a camelCase vendor payment create payload."""
     data = {
-        "vendor": vendor.id,
+        "vendor": {
+            "vendorId": vendor.vendor_id,
+            "vendorName": vendor.vendor_name,
+            "phone": vendor.phone or "",
+        },
         "amountPaid": str(amount),
+        "method": method,
     }
     if invoice is not None:
         data["invoice"] = invoice.invoice_number
@@ -603,7 +612,7 @@ class PurchaseInvoiceSerializerValidationTests(APITestCase):
 
     def test_nonexistent_vendor_id_returns_400(self):
         payload = _invoice_payload(self.vendor)
-        payload["vendor"]["id"] = 99999
+        payload["vendor"]["vendorId"] = 99999
         resp = self.client.post(self.url, payload, format="json")
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST,
                          "Non-existent vendorId should return 400")
@@ -930,14 +939,15 @@ class PurchaseInvoiceViewSetTests(APITestCase):
         self.assertIn("payment_status", inv_data,
                        "List must include payment_status")
 
-    def test_list_shape_has_flat_vendor(self):
+    def test_list_shape_has_nested_vendor(self):
         self._create_invoice()
         resp = self.client.get(self.url)
         inv_data = resp.data["results"][0]
-        self.assertIsInstance(inv_data["vendor"], int,
-                              "List vendor should be an integer ID")
-        self.assertIn("vendor_name", inv_data,
-                       "List vendor_name must be present")
+        self.assertIsInstance(inv_data["vendor"], dict,
+                              "List vendor should be a nested object")
+        for key in ["vendor_id", "vendor_name", "phone"]:
+            self.assertIn(key, inv_data["vendor"],
+                           f"List vendor object must contain '{key}'")
 
     def test_list_shape_no_items(self):
         self._create_invoice()
@@ -1252,7 +1262,7 @@ class VendorPaymentSerializerTests(APITestCase):
 
     def test_nonexistent_vendor_returns_400(self):
         payload = _payment_payload(self.vendor, Decimal("50.00"))
-        payload["vendor"]["id"] = 99999
+        payload["vendor"]["vendorId"] = 99999
         resp = self.client.post(self.url, payload, format="json")
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST,
                          "Non-existent vendorId in payment should return 400")
@@ -1498,10 +1508,10 @@ class VendorPaymentViewSetTests(APITestCase):
 
     # ── Response shape ───────────────────────────────────────────────
 
-    def test_response_shape_has_flat_vendor(self):
+    def test_response_shape_has_nested_vendor_object(self):
         resp = self._make_payment()
-        self.assertIsInstance(resp.data["vendor"], int,
-                              "Response must have an integer vendor ID")
+        self.assertIsInstance(resp.data["vendor"], dict,
+                              "Response must have nested vendor object")
 
     def test_response_shape_has_vendor_name_flat_field(self):
         """Per PROJECT_ANALYSIS.md line 96, vendorName IS present as a flat field
@@ -2274,3 +2284,58 @@ class PurchaseRBACTests(APITestCase):
             f"/api/purchase/vendors/{self.vendor.vendor_id}/",
         )
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_purchase_invoice_auto_status_transition_and_draft_locking(self):
+        """Test automatic transition from Draft to Saved when payment is added, and locking from revert/delete."""
+        self.client.force_authenticate(user=self.admin)
+        vendor = Vendor.objects.create(
+            vendor_name="Draft Lock Test Vendor",
+            phone="03008887766",
+        )
+        invoice = PurchaseInvoice.objects.create(
+            vendor=vendor,
+            payment_term="Credit",
+            paid_amount=Decimal("0.00"),
+            status="Draft",
+            date=date.today(),
+        )
+        PurchaseItem.objects.create(
+            invoice=invoice,
+            product_name="Draft Product",
+            quantity=Decimal("1"),
+            purchase_price=Decimal("1000.00"),
+            discount=Decimal("0.00"),
+        )
+        self.assertEqual(invoice.status, "Draft")
+
+        # 1. Apply supplier payment targeting Draft PurchaseInvoice
+        pay_resp = self.client.post(
+            "/api/purchase/vendor-payments/",
+            data={
+                "vendor": {"id": vendor.id, "vendor_id": vendor.vendor_id, "vendor_name": vendor.vendor_name, "phone": vendor.phone},
+                "invoice": invoice.invoice_number,
+                "amount_paid": "400.00",
+                "method": "Cash",
+            },
+            format="json"
+        )
+        self.assertEqual(pay_resp.status_code, status.HTTP_201_CREATED, pay_resp.data)
+
+        # 2. Check invoice status automatically transitioned to Saved
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.status, "Saved")
+
+        # 3. Attempting to revert status back to Draft should fail with validation error
+        patch_resp = self.client.patch(
+            f"/api/purchase/invoices/{invoice.id}/",
+            data={"status": "Draft"},
+            format="json"
+        )
+        self.assertEqual(patch_resp.status_code, 400)
+        self.assertIn("Cannot revert or delete Purchase Invoice because payments/advances are attached to it", str(patch_resp.data))
+
+        # 4. Attempting to delete the invoice should fail with 400 Bad Request
+        del_resp = self.client.delete(f"/api/purchase/invoices/{invoice.id}/")
+        self.assertEqual(del_resp.status_code, 400)
+        self.assertIn("Cannot revert or delete Purchase Invoice because payments/advances are attached to it", str(del_resp.data))
+
