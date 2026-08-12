@@ -212,9 +212,6 @@ class CustomerViewSet(viewsets.ModelViewSet):
                 balance_before_range += Decimal(str(inv.net_total))
             for pay in prior_payments:
                 balance_before_range -= Decimal(str(pay.amount_received))
-            for inv in prior_invoices:
-                balance_before_range -= Decimal(str(inv.advance_applied))
-                balance_before_range -= Decimal(str(inv.paid_amount))
             for ret in prior_returns:
                 balance_before_range -= Decimal(str(ret.net_return_amount))
             opening_credit_for_range = balance_before_range
@@ -236,9 +233,7 @@ class CustomerViewSet(viewsets.ModelViewSet):
 
         credit_sales = sum((Decimal(str(inv.net_total)) for inv in all_invoices if inv.payment_term == "Credit"), Decimal('0.00'))
         
-        standalone_payments = sum((Decimal(str(pay.amount_received)) for pay in all_payments), Decimal('0.00'))
-        invoice_payments = sum((Decimal(str(inv.paid_amount)) for inv in all_invoices), Decimal('0.00'))
-        total_paid = standalone_payments + invoice_payments
+        total_paid = sum((Decimal(str(pay.amount_received)) for pay in all_payments), Decimal('0.00'))
         
         total_purchases = sum((Decimal(str(inv.net_total)) for inv in all_invoices), Decimal('0.00'))
         total_invoices = len(all_invoices)
@@ -286,30 +281,6 @@ class CustomerViewSet(viewsets.ModelViewSet):
                 "balance": Decimal('0.00'),
                 "_sort_ts": inv.created_at,
             })
-            if inv.advance_applied > 0:
-                ledger_rows.append({
-                    "date": inv.date.isoformat() if inv.date else None,
-                    "voucher": f"ADV-{inv.invoice_number}",
-                    "description": "Advance Applied",
-                    "referenceType": "invoice",
-                    "referenceId": inv.id,
-                    "debit": Decimal('0.00'),
-                    "credit": Decimal(str(inv.advance_applied)),
-                    "balance": Decimal('0.00'),
-                    "_sort_ts": inv.created_at,
-                })
-            if inv.paid_amount > 0:
-                ledger_rows.append({
-                    "date": inv.date.isoformat() if inv.date else None,
-                    "voucher": f"PAY-{inv.invoice_number}",
-                    "description": f"Invoice Payment - {inv.payment_term}",
-                    "referenceType": "invoice",
-                    "referenceId": inv.id,
-                    "debit": Decimal('0.00'),
-                    "credit": Decimal(str(inv.paid_amount)),
-                    "balance": Decimal('0.00'),
-                    "_sort_ts": inv.created_at,
-                })
 
         for pay in all_payments:
             description = f"Payment - {pay.invoice.invoice_number}" if pay.invoice else "General Payment"
@@ -327,10 +298,12 @@ class CustomerViewSet(viewsets.ModelViewSet):
 
         for ret in all_returns:
             net = Decimal(str(ret.net_return_amount))
+            refund_type = getattr(ret, 'refund_type', 'STORE_CREDIT')
+            
             ledger_rows.append({
                 "date": ret.return_date.isoformat() if ret.return_date else None,
                 "voucher": ret.return_number,
-                "description": "Sales Return / Credit Note",
+                "description": f"Sales Return / Credit Note ({refund_type})",
                 "referenceType": "sales_return",
                 "referenceId": ret.id,
                 "debit": Decimal('0.00'),
@@ -338,6 +311,20 @@ class CustomerViewSet(viewsets.ModelViewSet):
                 "balance": Decimal('0.00'),
                 "_sort_ts": ret.created_at,
             })
+            
+            if refund_type == 'CASH':
+                # Offsetting Cash Paid Out entry
+                ledger_rows.append({
+                    "date": ret.return_date.isoformat() if ret.return_date else None,
+                    "voucher": f"REF-{ret.return_number}",
+                    "description": "Cash Refund Paid Out",
+                    "referenceType": "cash_refund",
+                    "referenceId": ret.id,
+                    "debit": net,
+                    "credit": Decimal('0.00'),
+                    "balance": Decimal('0.00'),
+                    "_sort_ts": ret.created_at,
+                })
 
         ledger_rows.sort(key=lambda r: r['_sort_ts'])
 
@@ -349,14 +336,13 @@ class CustomerViewSet(viewsets.ModelViewSet):
             running_balance += debit_val - credit_val
             row['balance'] = running_balance
 
-        final_balance = ledger_rows[-1]['balance'] if ledger_rows else Decimal('0.00')
+        # Calculate accurate remaining/advance balances directly
+        total_cash_refunds = sum((Decimal(str(r.net_return_amount)) for r in all_returns if getattr(r, 'refund_type', 'STORE_CREDIT') == 'CASH'), Decimal('0.00'))
+        retained_cash = total_paid - total_cash_refunds
+        net_credit_sales = opening_credit + sum((Decimal(str(inv.net_total_after_returns)) for inv in all_invoices), Decimal('0.00'))
 
-        if final_balance >= 0:
-            remaining_balance = final_balance
-            available_advance = Decimal('0.00')
-        else:
-            remaining_balance = Decimal('0.00')
-            available_advance = abs(final_balance)
+        available_advance = max(Decimal('0.00'), retained_cash - net_credit_sales)
+        remaining_balance = max(Decimal('0.00'), net_credit_sales - retained_cash)
 
         summary = {
             "creditSales": credit_sales,
@@ -388,6 +374,8 @@ class CustomerViewSet(viewsets.ModelViewSet):
             "customerName": customer.customer_name,
             "phone": customer.phone,
             "customerType": customer.customer_type,
+            "creditBalance": remaining_balance,
+            "advanceBalance": available_advance,
         }
 
         customer_invoices = list(customer.invoices.filter(status="Saved").values("id", "invoice_number"))
@@ -575,6 +563,12 @@ class SalesInvoiceViewSet(viewsets.ModelViewSet):
     @swagger_auto_schema(operation_description=SALES_PERMISSION_NOTE)
     def destroy(self, request, *args, **kwargs):
         invoice = self.get_object()
+
+        if invoice.paid_amount > 0 or invoice.advance_applied > 0 or invoice.payments.exists():
+            return Response(
+                {"error": "Cannot revert or delete Sales Invoice because payments/advances are attached to it."},
+                status=drf_status.HTTP_400_BAD_REQUEST
+            )
 
         # FIX: Atomic transaction block
         with transaction.atomic():
@@ -801,15 +795,24 @@ class PaymentReceivedViewSet(viewsets.ModelViewSet):
             result = serializer._apply_payment(
                 payment.customer, payment.amount_received, payment.invoice
             )
-            payment.balance_after = result['balance_after']
+            
             payment.applied_to_invoice = result['applied_to_invoice']
             payment.applied_to_credit = result['applied_to_credit']
             payment.applied_to_advance = result['applied_to_advance']
+            
+            payment.restore()
+            
+            if payment.customer:
+                payment.customer.recalculate_balances()
+                payment.customer.refresh_from_db()
+                payment.balance_after = payment.customer.credit_balance
+            else:
+                payment.balance_after = Decimal('0.00')
+
             payment.save(update_fields=[
                 'balance_after', 'applied_to_invoice',
                 'applied_to_credit', 'applied_to_advance',
             ])
-            payment.restore()
             
         return Response({"message": "Payment restored, balances re-applied."})
 

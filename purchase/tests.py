@@ -2284,3 +2284,58 @@ class PurchaseRBACTests(APITestCase):
             f"/api/purchase/vendors/{self.vendor.vendor_id}/",
         )
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_purchase_invoice_auto_status_transition_and_draft_locking(self):
+        """Test automatic transition from Draft to Saved when payment is added, and locking from revert/delete."""
+        self.client.force_authenticate(user=self.admin)
+        vendor = Vendor.objects.create(
+            vendor_name="Draft Lock Test Vendor",
+            phone="03008887766",
+        )
+        invoice = PurchaseInvoice.objects.create(
+            vendor=vendor,
+            payment_term="Credit",
+            paid_amount=Decimal("0.00"),
+            status="Draft",
+            date=date.today(),
+        )
+        PurchaseItem.objects.create(
+            invoice=invoice,
+            product_name="Draft Product",
+            quantity=Decimal("1"),
+            purchase_price=Decimal("1000.00"),
+            discount=Decimal("0.00"),
+        )
+        self.assertEqual(invoice.status, "Draft")
+
+        # 1. Apply supplier payment targeting Draft PurchaseInvoice
+        pay_resp = self.client.post(
+            "/api/purchase/vendor-payments/",
+            data={
+                "vendor": {"id": vendor.id, "vendor_id": vendor.vendor_id, "vendor_name": vendor.vendor_name, "phone": vendor.phone},
+                "invoice": invoice.invoice_number,
+                "amount_paid": "400.00",
+                "method": "Cash",
+            },
+            format="json"
+        )
+        self.assertEqual(pay_resp.status_code, status.HTTP_201_CREATED, pay_resp.data)
+
+        # 2. Check invoice status automatically transitioned to Saved
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.status, "Saved")
+
+        # 3. Attempting to revert status back to Draft should fail with validation error
+        patch_resp = self.client.patch(
+            f"/api/purchase/invoices/{invoice.id}/",
+            data={"status": "Draft"},
+            format="json"
+        )
+        self.assertEqual(patch_resp.status_code, 400)
+        self.assertIn("Cannot revert or delete Purchase Invoice because payments/advances are attached to it", str(patch_resp.data))
+
+        # 4. Attempting to delete the invoice should fail with 400 Bad Request
+        del_resp = self.client.delete(f"/api/purchase/invoices/{invoice.id}/")
+        self.assertEqual(del_resp.status_code, 400)
+        self.assertIn("Cannot revert or delete Purchase Invoice because payments/advances are attached to it", str(del_resp.data))
+

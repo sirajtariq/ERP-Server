@@ -16,15 +16,19 @@ from purchase.models import Expense, ExpenseItem, PurchaseInvoice, PurchaseItem,
 def validate_vendor_match(vendor_data):
     if not vendor_data:
         return None
-    try:
-        vendor = Vendor.objects.get(id=vendor_data['id'])
-        db_phone = vendor.phone or ''
-        in_phone = vendor_data.get('phone') or ''
-        if vendor.vendor_name.strip() != vendor_data['vendor_name'].strip() or db_phone.strip() != in_phone.strip():
-            raise serializers.ValidationError({"vendor": "Vendor details do not match our records."})
-        return vendor
-    except Vendor.DoesNotExist:
-        raise serializers.ValidationError({"vendor": "Vendor not found."})
+    if isinstance(vendor_data, Vendor):
+        return vendor_data
+    if isinstance(vendor_data, dict):
+        try:
+            vendor = Vendor.objects.get(id=vendor_data['id'])
+            db_phone = vendor.phone or ''
+            in_phone = vendor_data.get('phone') or ''
+            if vendor.vendor_name.strip() != vendor_data['vendor_name'].strip() or db_phone.strip() != in_phone.strip():
+                raise serializers.ValidationError({"vendor": "Vendor details do not match our records."})
+            return vendor
+        except Vendor.DoesNotExist:
+            raise serializers.ValidationError({"vendor": "Vendor not found."})
+    return vendor_data
 
 
 
@@ -58,6 +62,23 @@ class VendorSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         ]
+
+    def create(self, validated_data):
+        opening = validated_data.get('opening_payable') or Decimal('0.00')
+        validated_data['payable_balance'] = opening
+        return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        if 'opening_payable' in validated_data:
+            old_opening = instance.opening_payable or Decimal('0.00')
+            new_opening = validated_data.get('opening_payable') or Decimal('0.00')
+            diff = new_opening - old_opening
+            instance.payable_balance = instance.payable_balance + diff
+            if instance.payable_balance < Decimal('0.00'):
+                rem_neg = abs(instance.payable_balance)
+                instance.payable_balance = Decimal('0.00')
+                instance.advance_balance = max(Decimal('0.00'), instance.advance_balance - rem_neg)
+        return super().update(instance, validated_data)
 
     def validate_phone(self, value):
         """
@@ -342,25 +363,43 @@ class VendorPaymentSerializer(serializers.ModelSerializer):
         return attrs
 
     def _apply_payment(self, vendor, amount, invoice=None):
-        """Apply payment to invoice, payable balance, then advance balance."""
+        """Apply payment to invoice (FIFO for pending invoices if general payment), payable balance, then advance balance."""
         remaining = Decimal(str(amount))
         applied_to_invoice = Decimal('0')
 
+        # Step 1 — Selected invoice first
         if invoice:
-            invoice.refresh_from_db(fields=['paid_amount'])
+            if invoice.status == 'Draft':
+                invoice.status = 'Saved'
+                invoice.save(update_fields=['status'])
+                PurchaseInvoiceSerializer()._apply_invoice_balance_effects(invoice, Decimal('0.00'))
+            invoice.refresh_from_db(fields=['paid_amount', 'status'])
             invoice_due = invoice.balance_due
             if invoice_due > 0:
-                applied_to_invoice = min(invoice_due, remaining)
-                invoice.paid_amount += applied_to_invoice
+                pay_inv = min(invoice_due, remaining)
+                invoice.paid_amount += pay_inv
                 invoice.save(update_fields=['paid_amount'])
-                
-                # The invoice balance is part of the vendor's total payable balance only if Credit,
-                # so paying the invoice also reduces the vendor's payable balance.
-                if invoice.payment_term == 'Credit':
-                    vendor.payable_balance -= applied_to_invoice
-                
-                remaining -= applied_to_invoice
+                remaining -= pay_inv
+                applied_to_invoice += pay_inv
 
+        # Step 2 — General/Remaining payment: check and clear pending saved invoices in FIFO order (oldest first)
+        if remaining > 0 and not invoice:
+            pending_invoices = vendor.invoices.filter(is_deleted=False, status='Saved').order_by('date', 'id')
+            for inv in pending_invoices:
+                if invoice and inv.id == invoice.id:
+                    continue
+                inv.refresh_from_db(fields=['paid_amount'])
+                inv_due = inv.balance_due
+                if inv_due > 0:
+                    pay_inv = min(inv_due, remaining)
+                    inv.paid_amount += pay_inv
+                    inv.save(update_fields=['paid_amount'])
+                    remaining -= pay_inv
+                    applied_to_invoice += pay_inv
+                    if remaining == 0:
+                        break
+
+        # Step 3 — Apply remaining to general payable_balance, then advance_balance
         applied_to_payable, applied_to_advance = vendor.apply_payment(remaining)
 
         return {
@@ -374,15 +413,29 @@ class VendorPaymentSerializer(serializers.ModelSerializer):
         """Reverse payment effects."""
         vendor.reverse_payment(applied_to_payable, applied_to_advance)
 
-        if invoice and applied_to_invoice > 0:
-            invoice.paid_amount -= applied_to_invoice
-            invoice.save(update_fields=['paid_amount'])
-            
-            # Since the payment applied to the invoice reduced the vendor's
-            # payable balance (if Credit), we must restore it here.
-            if invoice.payment_term == 'Credit':
-                vendor.payable_balance += applied_to_invoice
-                vendor.save(update_fields=['payable_balance'])
+        if applied_to_invoice > 0:
+            rem_inv_rev = applied_to_invoice
+            if invoice:
+                invoice.refresh_from_db(fields=['paid_amount'])
+                rev_amount = min(invoice.paid_amount, rem_inv_rev)
+                if rev_amount > 0:
+                    invoice.paid_amount -= rev_amount
+                    invoice.save(update_fields=['paid_amount'])
+                    rem_inv_rev -= rev_amount
+
+            if rem_inv_rev > 0:
+                paid_invoices = vendor.invoices.filter(is_deleted=False, paid_amount__gt=0).order_by('-date', '-id')
+                for inv in paid_invoices:
+                    if invoice and inv.id == invoice.id:
+                        continue
+                    inv.refresh_from_db(fields=['paid_amount'])
+                    rev_amount = min(inv.paid_amount, rem_inv_rev)
+                    if rev_amount > 0:
+                        inv.paid_amount -= rev_amount
+                        inv.save(update_fields=['paid_amount'])
+                        rem_inv_rev -= rev_amount
+                        if rem_inv_rev == 0:
+                            break
 
     def create(self, validated_data):
         vendor = validated_data['vendor']
@@ -487,6 +540,18 @@ class PurchaseInvoiceSerializer(serializers.ModelSerializer):
         ]
 
     def validate(self, attrs):
+        if self.instance:
+            has_payments = (
+                self.instance.paid_amount > 0 or 
+                self.instance.advance_applied > 0 or 
+                self.instance.payments.exists()
+            )
+            new_status = attrs.get('status', self.instance.status)
+            if has_payments and new_status == 'Draft':
+                raise serializers.ValidationError(
+                    {"status": "Cannot revert or delete Purchase Invoice because payments/advances are attached to it."}
+                )
+
         if self.instance and self.instance.status == 'Saved':
             raise serializers.ValidationError(
                 {"status": "Saved invoices are locked and cannot be modified."}
@@ -592,17 +657,24 @@ class PurchaseInvoiceSerializer(serializers.ModelSerializer):
                 # and updates invoice.paid_amount and vendor balances.
                 result = serializer._apply_payment(vendor, original_paid_amount, invoice)
                 
+                if vendor:
+                    vendor.recalculate_balances()
+                    vendor.refresh_from_db()
+                    current_balance_after = vendor.payable_balance
+                else:
+                    current_balance_after = Decimal('0.00')
+                
                 # Create the VendorPayment record
                 VendorPayment.objects.create(
                     vendor=vendor,
                     invoice=invoice,
                     amount_paid=original_paid_amount,
-                    balance_after=result['balance_after'],
+                    balance_after=current_balance_after,
                     method=invoice.payment_method or 'Cash',
                     notes=f"Auto-recorded from invoice {invoice.invoice_number}",
-                    applied_to_invoice=result['applied_to_invoice'],
-                    applied_to_payable=result['applied_to_payable'],
-                    applied_to_advance=result['applied_to_advance']
+                    applied_to_invoice=result.get('applied_to_invoice', Decimal('0.00')),
+                    applied_to_payable=result.get('applied_to_payable', Decimal('0.00')),
+                    applied_to_advance=result.get('applied_to_advance', Decimal('0.00'))
                 )
 
     def _reverse_invoice_balance_effects(self, invoice):
@@ -633,6 +705,10 @@ class PurchaseInvoiceSerializer(serializers.ModelSerializer):
             for item_data in items_data:
                 PurchaseItem.objects.create(invoice=invoice, **item_data)
 
+            if (invoice.paid_amount > 0 or invoice.advance_applied > 0) and invoice.status == 'Draft':
+                invoice.status = 'Saved'
+                invoice.save(update_fields=['status'])
+
             if invoice.status == 'Saved':
                 invoice.refresh_from_db()
                 self._apply_invoice_balance_effects(invoice, original_paid_amount)
@@ -649,6 +725,10 @@ class PurchaseInvoiceSerializer(serializers.ModelSerializer):
             for attr, value in validated_data.items():
                 setattr(instance, attr, value)
             instance.save()
+
+            if (instance.paid_amount > 0 or instance.advance_applied > 0) and instance.status == 'Draft':
+                instance.status = 'Saved'
+                instance.save(update_fields=['status'])
 
             if items_data is not None:
                 instance.items.all().delete()

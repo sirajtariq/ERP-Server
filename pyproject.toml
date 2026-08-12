@@ -13,4 +13,6 @@ dependencies = [
     "drf-yasg>=1.21.15",
     "faker>=40.36.0",
     "pillow>=12.3.0",
+    "pyinstaller>=6.22.0",
+    "waitress>=3.0.2",
 ]

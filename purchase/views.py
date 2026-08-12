@@ -468,6 +468,12 @@ class PurchaseInvoiceViewSet(PurchaseCamelCaseMixin, viewsets.ModelViewSet):
     def destroy(self, request, *args, **kwargs):
         invoice = self.get_object()
 
+        if invoice.paid_amount > 0 or invoice.advance_applied > 0 or invoice.payments.exists():
+            return Response(
+                {"error": "Cannot revert or delete Purchase Invoice because payments/advances are attached to it."},
+                status=drf_status.HTTP_400_BAD_REQUEST
+            )
+
         with transaction.atomic():
             if invoice.status == 'Saved':
                 serializer = self.get_serializer()
@@ -645,12 +651,29 @@ class VendorPaymentViewSet(PurchaseCamelCaseMixin, viewsets.ModelViewSet):
                 return Response({"error": "Not found in trash."}, status=drf_status.HTTP_404_NOT_FOUND)
 
             serializer = self.get_serializer()
-            serializer._apply_payment(
+            result = serializer._apply_payment(
                 payment.vendor,
                 payment.amount_paid,
                 payment.invoice
             )
+            
+            payment.applied_to_invoice = result.get('applied_to_invoice', Decimal('0.00'))
+            payment.applied_to_credit = result.get('applied_to_credit', Decimal('0.00'))
+            payment.applied_to_advance = result.get('applied_to_advance', Decimal('0.00'))
+            
             payment.restore()
+            
+            if payment.vendor:
+                payment.vendor.recalculate_balances()
+                payment.vendor.refresh_from_db()
+                payment.balance_after = payment.vendor.payable_balance
+            else:
+                payment.balance_after = Decimal('0.00')
+
+            payment.save(update_fields=[
+                'balance_after', 'applied_to_invoice',
+                'applied_to_credit', 'applied_to_advance',
+            ])
 
         return Response({"message": "Payment restored, balance re-applied."})
 

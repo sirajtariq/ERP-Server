@@ -4,15 +4,27 @@ Django settings for erp_backend project.
 Desktop ERP REST API — SQLite, DRF, CORS (all origins), Swagger docs.
 """
 
+import os
+import sys
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 SECRET_KEY = "django-insecure-=vajt=e)qx1xoe*xx22wgveo4aw2geb_wq6(^c-+3+p^=f4e(w"
 
-DEBUG = True
+IS_DESKTOP_PROD = os.environ.get("ERP_DESKTOP_PROD") == "1" or getattr(sys, "frozen", False)
 
-ALLOWED_HOSTS = ["127.0.0.1", "localhost"]
+if IS_DESKTOP_PROD:
+    DEBUG = False
+    ALLOWED_HOSTS = ["*"]
+    appdata_dir = os.environ.get("APPDATA") or os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    DATA_DIR = Path(appdata_dir) / "LenDenERP"
+else:
+    DEBUG = True
+    ALLOWED_HOSTS = ["127.0.0.1", "localhost"]
+    DATA_DIR = BASE_DIR
+
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -67,7 +79,7 @@ WSGI_APPLICATION = "erp_backend.wsgi.application"
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.sqlite3",
-        "NAME": BASE_DIR / "db.sqlite3",
+        "NAME": DATA_DIR / "db.sqlite3",
     }
 }
 
@@ -86,7 +98,7 @@ USE_TZ = True
 STATIC_URL = "static/"
 
 MEDIA_URL = "/media/"
-MEDIA_ROOT = BASE_DIR / "media"
+MEDIA_ROOT = DATA_DIR / "media"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
