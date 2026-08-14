@@ -1132,6 +1132,8 @@ class SalesReturnViewSet(viewsets.ModelViewSet):
             if sales_return.status == 'Saved':
                 serializer = self.get_serializer()
                 serializer._apply_return_balance_effects(sales_return)
+                from inventory.services import process_sales_return_stock
+                process_sales_return_stock(sales_return)
 
             sales_return.restore()
 

@@ -460,4 +460,111 @@ class CrossModuleIntegrationTests(TestCase):
         services.reverse_document_stock('sales_invoice', invoice.id)
         self.assertEqual(services.get_item_current_stock(self.item), Decimal("10.00"))
 
+    def test_draft_to_saved_excess_qty_returns_400_and_keeps_draft_status(self):
+        from sales.models import Customer, SalesInvoice, SalesItem
+
+        # Set stock to 160
+        item_160 = Item.objects.create(
+            item_code="STK-160",
+            name="Filter 160",
+            category="Filters",
+            unit="pcs",
+            purchase_rate=Decimal("100.00"),
+            sale_rate=Decimal("150.00"),
+            opening_stock=Decimal("160.00"),
+        )
+        services.record_stock_movement(item_160, "in", Decimal("160.00"), "Opening Stock", ref_type="opening")
+        self.assertEqual(services.get_item_current_stock(item_160), Decimal("160.00"))
+
+        customer = Customer.objects.create(
+            customer_name="Draft Test Customer",
+            customer_type="permanent",
+            phone="03001234567",
+        )
+        invoice = SalesInvoice.objects.create(
+            customer=customer,
+            payment_term="Credit",
+            status="Draft",
+        )
+        SalesItem.objects.create(
+            invoice=invoice,
+            item_name="Filter 160",
+            quantity=Decimal("170.00"),  # Exceeds 160!
+            rate=Decimal("150.00"),
+        )
+
+        payload = {
+            "customer_id": customer.id,
+            "payment_term": "Credit",
+            "status": "Saved",
+            "items": [
+                {
+                    "item_name": "Filter 160",
+                    "quantity": "170.00",
+                    "rate": "150.00",
+                    "discount": "0.00",
+                }
+            ],
+        }
+
+        response = self.client.put(f"/api/sales/invoices/{invoice.id}/", payload, content_type="application/json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        # DB status MUST remain 'Draft'
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.status, "Draft")
+
+    def test_sales_return_increments_stock_immediately(self):
+        from sales.models import Customer, SalesInvoice, SalesItem, SalesReturn, SalesReturnItem
+
+        customer = Customer.objects.create(
+            customer_name="Return Test Customer",
+            customer_type="permanent",
+            phone="03004443322",
+        )
+        invoice = SalesInvoice.objects.create(
+            customer=customer,
+            payment_term="Credit",
+            status="Saved",
+        )
+        sales_item = SalesItem.objects.create(
+            invoice=invoice,
+            item_name="Integration Spark Plug",
+            quantity=Decimal("4.00"),
+            rate=Decimal("200.00"),
+        )
+        services.process_sales_invoice_stock(invoice)
+        self.assertEqual(services.get_item_current_stock(self.item), Decimal("6.00"))
+
+        # Create Sales Return in 'Saved' status
+        sales_return = SalesReturn.objects.create(
+            invoice=invoice,
+            customer=customer,
+            status="Saved",
+            refund_type="STORE_CREDIT",
+        )
+        SalesReturnItem.objects.create(
+            sales_return=sales_return,
+            sales_item=sales_item,
+            item_name="Integration Spark Plug",
+            quantity=Decimal("4.00"),
+            rate=Decimal("200.00"),
+        )
+
+        # Process return inward stock
+        services.process_sales_return_stock(sales_return)
+
+        # Stock increments back to 10
+        self.assertEqual(services.get_item_current_stock(self.item), Decimal("10.00"))
+
+        # Verify StockMovement reason is 'Sale Return'
+        movement = StockMovement.objects.filter(
+            reference_type="sales_return",
+            reference_id=sales_return.id,
+        ).first()
+        self.assertIsNotNone(movement)
+        self.assertEqual(movement.type, "in")
+        self.assertEqual(movement.reason, "Sale Return")
+        self.assertEqual(movement.quantity, Decimal("4.00"))
+
 

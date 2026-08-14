@@ -321,3 +321,44 @@ def reverse_document_stock(ref_type: str, ref_id: int) -> int:
             reference_id=ref_id
         ).delete()
     return deleted_count
+
+
+def process_sales_return_stock(sales_return) -> list:
+    """
+    Evaluates and records inward stock movements for all line items in a SalesReturn / Credit Note.
+    Runs inside transaction.atomic().
+    """
+    movements = []
+    with transaction.atomic():
+        for line_item in sales_return.items.all():
+            item_name = line_item.item_name
+            item = Item.objects.filter(
+                Q(name__iexact=item_name) | Q(item_code__iexact=item_name),
+                is_deleted=False
+            ).select_for_update().first()
+
+            if not item:
+                item = Item.objects.filter(
+                    name__icontains=item_name,
+                    is_deleted=False
+                ).select_for_update().first()
+
+            if not item:
+                continue
+
+            qty = Decimal(str(line_item.quantity))
+            ret_date = getattr(sales_return, 'return_date', None) or timezone.now().date()
+            ret_no = getattr(sales_return, 'return_number', None) or f"CN-{sales_return.id}"
+
+            movement = record_stock_movement(
+                item=item,
+                movement_type='in',
+                quantity=qty,
+                reason='Sale Return',
+                date=ret_date,
+                notes=f"Sales Return #{ret_no}",
+                ref_type='sales_return',
+                ref_id=sales_return.id
+            )
+            movements.append(movement)
+    return movements
