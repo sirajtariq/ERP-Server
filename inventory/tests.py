@@ -363,3 +363,101 @@ class InventoryAPITestCase(TestCase):
         self.assertIn("note", first_row)
 
 
+class CrossModuleIntegrationTests(TestCase):
+    def setUp(self):
+        from django.contrib.auth.models import Group, User
+        self.user = User.objects.create_superuser(username="admin", password="password123")
+        self.client.force_login(self.user)
+
+        self.item = Item.objects.create(
+            item_code="INT-001",
+            name="Integration Spark Plug",
+            category="Engine",
+            unit="pcs",
+            purchase_rate=Decimal("100.00"),
+            sale_rate=Decimal("200.00"),
+            opening_stock=Decimal("10.00"),
+        )
+        services.record_stock_movement(self.item, "in", Decimal("10.00"), "Opening Stock", ref_type="opening")
+
+    def test_sales_invoice_insufficient_stock_raises_error(self):
+        from sales.models import Customer, SalesInvoice, SalesItem
+
+        customer = Customer.objects.create(
+            customer_name="Stock Test Customer",
+            customer_type="permanent",
+            phone="03009998877",
+        )
+
+        invoice = SalesInvoice.objects.create(
+            customer=customer,
+            payment_term="Credit",
+            status="Draft",
+        )
+        SalesItem.objects.create(
+            invoice=invoice,
+            item_name="Integration Spark Plug",
+            quantity=Decimal("15.00"),  # Only 10 available!
+            rate=Decimal("200.00"),
+        )
+
+        with self.assertRaises(ValidationError):
+            services.process_sales_invoice_stock(invoice)
+
+        # Verify stock remains 10
+        self.assertEqual(services.get_item_current_stock(self.item), Decimal("10.00"))
+
+    def test_purchase_bill_increments_stock_and_updates_purchase_rate(self):
+        from purchase.models import Vendor, PurchaseInvoice, PurchaseItem
+
+        vendor = Vendor.objects.create(
+            vendor_name="Global Auto Supplies",
+            phone="03001112233",
+        )
+        bill = PurchaseInvoice.objects.create(
+            vendor=vendor,
+            payment_term="Credit",
+            status="Saved",
+        )
+        PurchaseItem.objects.create(
+            invoice=bill,
+            product_name="Integration Spark Plug",
+            quantity=Decimal("25.00"),
+            purchase_price=Decimal("145.00"),
+        )
+
+        services.process_purchase_bill_stock(bill)
+
+        self.item.refresh_from_db()
+        self.assertEqual(services.get_item_current_stock(self.item), Decimal("35.00"))
+        self.assertEqual(self.item.purchase_rate, Decimal("145.00"))
+
+    def test_trashing_sales_invoice_restores_stock(self):
+        from sales.models import Customer, SalesInvoice, SalesItem
+
+        customer = Customer.objects.create(
+            customer_name="Reversal Customer",
+            customer_type="permanent",
+            phone="03007776655",
+        )
+        invoice = SalesInvoice.objects.create(
+            customer=customer,
+            payment_term="Credit",
+            status="Saved",
+        )
+        SalesItem.objects.create(
+            invoice=invoice,
+            item_name="Integration Spark Plug",
+            quantity=Decimal("4.00"),
+            rate=Decimal("200.00"),
+        )
+
+        # Process outward stock
+        services.process_sales_invoice_stock(invoice)
+        self.assertEqual(services.get_item_current_stock(self.item), Decimal("6.00"))
+
+        # Reverse stock (simulating trashing)
+        services.reverse_document_stock('sales_invoice', invoice.id)
+        self.assertEqual(services.get_item_current_stock(self.item), Decimal("10.00"))
+
+

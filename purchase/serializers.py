@@ -693,6 +693,9 @@ class PurchaseInvoiceSerializer(serializers.ModelSerializer):
                 invoice.advance_applied = Decimal('0.00')
                 invoice.save(update_fields=['paid_amount', 'advance_applied'])
 
+        from inventory.services import reverse_document_stock
+        reverse_document_stock('purchase_bill', invoice.id)
+
     def create(self, validated_data: dict) -> PurchaseInvoice:
         from django.db import transaction
         
@@ -712,6 +715,8 @@ class PurchaseInvoiceSerializer(serializers.ModelSerializer):
             if invoice.status == 'Saved':
                 invoice.refresh_from_db()
                 self._apply_invoice_balance_effects(invoice, original_paid_amount)
+                from inventory.services import process_purchase_bill_stock
+                process_purchase_bill_stock(invoice)
 
         return invoice
 
@@ -739,5 +744,11 @@ class PurchaseInvoiceSerializer(serializers.ModelSerializer):
                 instance.refresh_from_db()
                 original_paid_amount = instance.paid_amount
                 self._apply_invoice_balance_effects(instance, original_paid_amount)
+                from inventory.services import process_purchase_bill_stock
+                process_purchase_bill_stock(instance)
+            elif instance.status == 'Saved':
+                from inventory.services import process_purchase_bill_stock, reverse_document_stock
+                reverse_document_stock('purchase_bill', instance.id)
+                process_purchase_bill_stock(instance)
 
         return instance

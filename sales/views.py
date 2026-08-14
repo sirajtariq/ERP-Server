@@ -603,6 +603,8 @@ class SalesInvoiceViewSet(viewsets.ModelViewSet):
             if invoice.status == 'Saved':
                 serializer = self.get_serializer()
                 serializer._apply_invoice_balance_effects(invoice, Decimal('0.00'))
+                from inventory.services import process_sales_invoice_stock
+                process_sales_invoice_stock(invoice)
 
             invoice.restore()
 

@@ -529,6 +529,9 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                 invoice.advance_applied = Decimal('0.00')
                 invoice.save(update_fields=['paid_amount', 'advance_applied'])
 
+        from inventory.services import reverse_document_stock
+        reverse_document_stock('sales_invoice', invoice.id)
+
     def create(self, validated_data: dict) -> SalesInvoice:
         items_data = validated_data.pop("items")
         customer_data = validated_data.pop("customer")
@@ -554,6 +557,8 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             # Pull freshly calculated database fields before running accounting side-effects
             invoice.refresh_from_db()
             self._apply_invoice_balance_effects(invoice, original_paid_amount)
+            from inventory.services import process_sales_invoice_stock
+            process_sales_invoice_stock(invoice)
 
         return invoice
 
@@ -588,6 +593,12 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             instance.refresh_from_db()
             original_paid_amount = instance.paid_amount
             self._apply_invoice_balance_effects(instance, original_paid_amount)
+            from inventory.services import process_sales_invoice_stock
+            process_sales_invoice_stock(instance)
+        elif instance.status == 'Saved':
+            from inventory.services import process_sales_invoice_stock, reverse_document_stock
+            reverse_document_stock('sales_invoice', instance.id)
+            process_sales_invoice_stock(instance)
 
         return instance
 

@@ -208,3 +208,116 @@ def record_stock_movement(
         )
 
         return movement
+
+
+def process_sales_invoice_stock(invoice) -> list:
+    """
+    Evaluates and records outward stock movements for all line items in a SalesInvoice.
+    Runs inside transaction.atomic().
+    Validates available stock using select_for_update() and get_item_current_stock().
+    Raises serializers.ValidationError if requested_qty > current_stock.
+    """
+    movements = []
+    with transaction.atomic():
+        for line_item in invoice.items.all():
+            item_name = line_item.item_name
+            # Resolve item in inventory catalog (exact match or partial match)
+            item = Item.objects.filter(
+                Q(name__iexact=item_name) | Q(item_code__iexact=item_name),
+                is_deleted=False
+            ).select_for_update().first()
+
+            if not item:
+                item = Item.objects.filter(
+                    name__icontains=item_name,
+                    is_deleted=False
+                ).select_for_update().first()
+
+            if not item:
+                continue
+
+            current_stock = get_item_current_stock(item)
+            requested_qty = Decimal(str(line_item.quantity))
+
+            if requested_qty > current_stock:
+                raise serializers.ValidationError({
+                    "detail": f"Insufficient stock for '{item.name}'. Available: {current_stock:.2f}, Requested: {requested_qty:.2f}"
+                })
+
+            inv_date = getattr(invoice, 'date', None) or timezone.now().date()
+            inv_no = getattr(invoice, 'invoice_number', None) or f"ID-{invoice.id}"
+
+            movement = record_stock_movement(
+                item=item,
+                movement_type='out',
+                quantity=requested_qty,
+                reason='Sale',
+                date=inv_date,
+                notes=f"Sales Invoice #{inv_no}",
+                ref_type='sales_invoice',
+                ref_id=invoice.id
+            )
+            movements.append(movement)
+    return movements
+
+
+def process_purchase_bill_stock(bill) -> list:
+    """
+    Evaluates and records inward stock movements for all line items in a PurchaseInvoice / Bill.
+    Runs inside transaction.atomic().
+    Updates item master purchase_rate to bill_line.purchase_price.
+    """
+    movements = []
+    with transaction.atomic():
+        for line_item in bill.items.all():
+            product_name = line_item.product_name
+            item = Item.objects.filter(
+                Q(name__iexact=product_name) | Q(item_code__iexact=product_name),
+                is_deleted=False
+            ).select_for_update().first()
+
+            if not item:
+                item = Item.objects.filter(
+                    name__icontains=product_name,
+                    is_deleted=False
+                ).select_for_update().first()
+
+            if not item:
+                continue
+
+            qty = Decimal(str(line_item.quantity))
+            bill_date = getattr(bill, 'date', None) or timezone.now().date()
+            bill_no = getattr(bill, 'invoice_number', None) or f"ID-{bill.id}"
+
+            movement = record_stock_movement(
+                item=item,
+                movement_type='in',
+                quantity=qty,
+                reason='Purchase',
+                date=bill_date,
+                notes=f"Purchase Bill #{bill_no}",
+                ref_type='purchase_bill',
+                ref_id=bill.id
+            )
+            movements.append(movement)
+
+            # Master Purchase Rate Auto-Update
+            new_purchase_rate = Decimal(str(line_item.purchase_price))
+            item.purchase_rate = new_purchase_rate
+            item.save(update_fields=['purchase_rate', 'updated_at'])
+
+    return movements
+
+
+def reverse_document_stock(ref_type: str, ref_id: int) -> int:
+    """
+    Purges stock movement audit records matching reference_type and reference_id.
+    Runs inside transaction.atomic().
+    Restores dynamic current stock automatically for all affected items.
+    """
+    with transaction.atomic():
+        deleted_count, _ = StockMovement.objects.filter(
+            reference_type=ref_type,
+            reference_id=ref_id
+        ).delete()
+    return deleted_count
