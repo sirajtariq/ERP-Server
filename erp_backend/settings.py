@@ -41,6 +41,7 @@ INSTALLED_APPS = [
     # Project core (RBAC group seeding)
     "erp_backend.apps.ErpBackendConfig",
     # Business modules
+    "inventory.apps.InventoryConfig",
     "sales.apps.SalesConfig",
     "purchase.apps.PurchaseConfig",
     "dashboard",
