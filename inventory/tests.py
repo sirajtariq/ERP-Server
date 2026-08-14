@@ -295,3 +295,65 @@ class InventoryAPITestCase(TestCase):
         self.assertEqual(len(res_page.data["results"]), 2)
         self.assertIsNotNone(res_page.data["next"])
 
+    def test_item_detail_endpoint(self):
+        item = Item.objects.create(
+            item_code="DET-001",
+            name="Engine Oil 20W-50 (1L)",
+            category="Lubricants",
+            unit="liter",
+            purchase_rate=Decimal("850.00"),
+            sale_rate=Decimal("1100.00"),
+            opening_stock=Decimal("100.00"),
+            min_stock=Decimal("20.00"),
+            description="Premium Engine Oil",
+        )
+        services.record_stock_movement(item, "in", Decimal("100.00"), "Opening Stock", ref_type="opening")
+        services.record_stock_movement(item, "out", Decimal("20.00"), "Sale Invoice #101")
+
+        response = self.client.get(f"/api/inventory/items/{item.id}/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        data = response.data
+
+        self.assertEqual(data["id"], item.id)
+        self.assertEqual(data["itemName"], "Engine Oil 20W-50 (1L)")
+        self.assertEqual(data["itemCode"], "DET-001")
+        self.assertEqual(data["itemStatus"], "in_stock")
+        self.assertEqual(data["category"], "Lubricants")
+        self.assertEqual(data["unit"], "liter")
+        self.assertEqual(data["minStock"], "20.00")
+        self.assertEqual(data["description"], "Premium Engine Oil")
+        self.assertEqual(data["openingStock"], "100.00")
+        self.assertEqual(data["totalIn"], "100.00")
+        self.assertEqual(data["totalOut"], "20.00")
+        self.assertEqual(data["currentStock"], "80.00")
+        self.assertEqual(data["profitPerItem"], "250.00")
+        self.assertEqual(data["stockValue"], "68000.00")
+        self.assertEqual(data["purchaseRate"], "850.00")
+        self.assertEqual(data["saleRate"], "1100.00")
+        self.assertEqual(data["profitMargin"], 29.41)
+
+    def test_item_history_endpoint(self):
+        item = Item.objects.create(
+            item_code="HST-001",
+            name="Filter Element",
+            category="Filters",
+            unit="pcs",
+            purchase_rate=Decimal("200.00"),
+            sale_rate=Decimal("350.00"),
+        )
+        services.record_stock_movement(item, "in", Decimal("50.00"), "Opening", ref_type="opening")
+        services.record_stock_movement(item, "out", Decimal("10.00"), "Damaged Stock", notes="Water damage")
+
+        response = self.client.get(f"/api/inventory/items/{item.id}/history/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("summary", response.data)
+        self.assertEqual(response.data["summary"]["totalIn"], "50.00")
+        self.assertEqual(response.data["summary"]["totalOut"], "10.00")
+        self.assertEqual(len(response.data["results"]), 2)
+
+        first_row = response.data["results"][0]
+        self.assertIn("stockBefore", first_row)
+        self.assertIn("stockAfter", first_row)
+        self.assertIn("note", first_row)
+
+

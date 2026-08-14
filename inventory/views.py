@@ -14,6 +14,7 @@ from inventory.serializers import (
     ItemListSerializer,
     ItemDetailSerializer,
     StockMovementSerializer,
+    StockMovementHistorySerializer,
     StockAdjustmentSerializer,
 )
 import inventory.services as services
@@ -189,12 +190,71 @@ class ItemViewSet(viewsets.ModelViewSet):
         """Alias for adjust_stock for frontend compatibility."""
         return self.adjust_stock(request, pk)
 
+    @swagger_auto_schema(
+        operation_description="Retrieve stock movement history for a specific item with optional date range filtering.",
+        manual_parameters=[
+            openapi.Parameter(
+                "page", openapi.IN_QUERY,
+                description="Page number (default: 1)",
+                type=openapi.TYPE_INTEGER,
+                default=1,
+            ),
+            openapi.Parameter(
+                "page_size", openapi.IN_QUERY,
+                description="Items per page (default: 10)",
+                type=openapi.TYPE_INTEGER,
+                default=10,
+            ),
+            openapi.Parameter(
+                "start_date", openapi.IN_QUERY,
+                description="Start date for filtering (YYYY-MM-DD)",
+                type=openapi.TYPE_STRING,
+            ),
+            openapi.Parameter(
+                "end_date", openapi.IN_QUERY,
+                description="End date for filtering (YYYY-MM-DD)",
+                type=openapi.TYPE_STRING,
+            ),
+        ]
+    )
+    @action(detail=True, methods=['get'], url_path='history')
+    def history(self, request, pk=None):
+        item = self.get_object()
+        qs = item.stock_movements.all().order_by('-date', '-id')
+
+        start_date = request.query_params.get('start_date')
+        end_date = request.query_params.get('end_date')
+
+        if start_date:
+            qs = qs.filter(date__gte=start_date)
+        if end_date:
+            qs = qs.filter(date__lte=end_date)
+
+        summary = services.calculate_item_summary(item, start_date=start_date, end_date=end_date)
+
+        page = self.paginate_queryset(qs)
+        if page is not None:
+            serializer = StockMovementHistorySerializer(page, many=True)
+            response_data = self.get_paginated_response(serializer.data).data
+        else:
+            serializer = StockMovementHistorySerializer(qs, many=True)
+            response_data = {
+                "count": len(serializer.data),
+                "next": None,
+                "previous": None,
+                "results": serializer.data
+            }
+
+        response_data['summary'] = {
+            "totalIn": f"{summary['total_in']:.2f}",
+            "totalOut": f"{summary['total_out']:.2f}",
+        }
+        return Response(response_data)
+
     @action(detail=True, methods=['get'], url_path='movements')
     def movements(self, request, pk=None):
-        item = self.get_object()
-        movements = item.stock_movements.all()
-        serializer = StockMovementSerializer(movements, many=True)
-        return Response(serializer.data)
+        """Alias for history action for frontend compatibility."""
+        return self.history(request, pk)
 
 
 class StockMovementViewSet(viewsets.ReadOnlyModelViewSet):

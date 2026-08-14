@@ -178,42 +178,97 @@ class ItemSerializer(serializers.ModelSerializer):
         return item
 
 
-class ItemDetailSerializer(ItemSerializer):
+class ItemDetailSerializer(serializers.ModelSerializer):
     """
-    Detailed serializer for GET /api/inventory/items/{id}/
-    Includes rates breakdown, stock summary dictionary, and stock movements history.
+    Flat camelCase Item Detail serializer for GET /api/inventory/items/{id}/
+    All calculated metrics come directly from services.calculate_item_summary(item).
     """
-    rates = serializers.SerializerMethodField()
-    stockSummary = serializers.SerializerMethodField()
-    stockMovements = serializers.SerializerMethodField()
+    itemName = serializers.CharField(source='name', read_only=True)
+    itemCode = serializers.CharField(source='item_code', read_only=True)
+    itemStatus = serializers.SerializerMethodField()
+    minStock = serializers.DecimalField(source='min_stock', max_digits=12, decimal_places=2, read_only=True)
+    openingStock = serializers.DecimalField(source='opening_stock', max_digits=12, decimal_places=2, read_only=True)
+    purchaseRate = serializers.DecimalField(source='purchase_rate', max_digits=12, decimal_places=2, read_only=True)
+    saleRate = serializers.DecimalField(source='sale_rate', max_digits=12, decimal_places=2, read_only=True)
+    totalIn = serializers.SerializerMethodField()
+    totalOut = serializers.SerializerMethodField()
+    currentStock = serializers.SerializerMethodField()
+    profitPerItem = serializers.SerializerMethodField()
+    stockValue = serializers.SerializerMethodField()
+    profitMargin = serializers.SerializerMethodField()
 
-    class Meta(ItemSerializer.Meta):
-        fields = ItemSerializer.Meta.fields + ['rates', 'stockSummary', 'stockMovements']
+    class Meta:
+        model = Item
+        fields = [
+            'id',
+            'itemName',
+            'itemCode',
+            'itemStatus',
+            'category',
+            'unit',
+            'minStock',
+            'description',
+            'openingStock',
+            'totalIn',
+            'totalOut',
+            'currentStock',
+            'profitPerItem',
+            'stockValue',
+            'purchaseRate',
+            'saleRate',
+            'profitMargin',
+        ]
+        read_only_fields = fields
 
-    def get_rates(self, obj) -> dict:
-        summary = services.calculate_item_summary(obj)
-        return {
-            "purchaseRate": f"{obj.purchase_rate:.2f}",
-            "saleRate": f"{obj.sale_rate:.2f}",
-            "profitPerUnit": f"{summary['profit_per_unit']:.2f}",
-            "profitMarginPct": summary["profit_margin_pct"],
-        }
+    def _get_summary(self, obj) -> dict:
+        if not hasattr(obj, '_cached_summary'):
+            obj._cached_summary = services.calculate_item_summary(obj)
+        return obj._cached_summary
 
-    def get_stockSummary(self, obj) -> dict:
-        summary = services.calculate_item_summary(obj)
-        return {
-            "currentStock": f"{summary['current_stock']:.2f}",
-            "totalIn": f"{summary['total_in']:.2f}",
-            "totalOut": f"{summary['total_out']:.2f}",
-            "stockValue": f"{summary['stock_value']:.2f}",
-            "profitPerUnit": f"{summary['profit_per_unit']:.2f}",
-            "profitMarginPct": summary["profit_margin_pct"],
-            "stockStatus": summary["stock_status"],
-        }
+    def get_itemStatus(self, obj) -> str:
+        return self._get_summary(obj)['stock_status']
 
-    def get_stockMovements(self, obj) -> list:
-        movements = obj.stock_movements.all()[:50]
-        return StockMovementSerializer(movements, many=True).data
+    def get_totalIn(self, obj) -> str:
+        return f"{self._get_summary(obj)['total_in']:.2f}"
+
+    def get_totalOut(self, obj) -> str:
+        return f"{self._get_summary(obj)['total_out']:.2f}"
+
+    def get_currentStock(self, obj) -> str:
+        return f"{self._get_summary(obj)['current_stock']:.2f}"
+
+    def get_profitPerItem(self, obj) -> str:
+        return f"{self._get_summary(obj)['profit_per_unit']:.2f}"
+
+    def get_stockValue(self, obj) -> str:
+        return f"{self._get_summary(obj)['stock_value']:.2f}"
+
+    def get_profitMargin(self, obj) -> float:
+        return self._get_summary(obj)['profit_margin_pct']
+
+
+class StockMovementHistorySerializer(serializers.ModelSerializer):
+    """
+    Serializer for item stock movement history log in Item Detail modal.
+    Outputs flat camelCase JSON keys.
+    """
+    note = serializers.CharField(source='notes', allow_null=True, read_only=True)
+    stockBefore = serializers.DecimalField(source='stock_before', max_digits=12, decimal_places=2, read_only=True)
+    stockAfter = serializers.DecimalField(source='stock_after', max_digits=12, decimal_places=2, read_only=True)
+
+    class Meta:
+        model = StockMovement
+        fields = [
+            'id',
+            'date',
+            'type',
+            'quantity',
+            'reason',
+            'note',
+            'stockBefore',
+            'stockAfter',
+        ]
+        read_only_fields = fields
 
 
 class StockAdjustmentSerializer(serializers.Serializer):
