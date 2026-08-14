@@ -197,25 +197,31 @@ class InventoryAPITestCase(TestCase):
             sale_rate=Decimal("450.00"),
         )
         # Adjust stock IN
-        payload = {
-            "type": "in",
-            "qty": "50.00",
+        payload_in = {
+            "adjustmentType": "stockIn",
+            "quantity": "50.00",
+            "date": "2026-08-14",
             "reason": "Stock Purchase Inward",
-            "notes": "Batch #1002"
+            "note": "Batch #1002"
         }
-        response = self.client.post(f"/api/inventory/items/{item.id}/adjust_stock/", payload, format="json")
+        response = self.client.post(f"/api/inventory/items/{item.id}/adjust/", payload_in, format="json")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["itemSummary"]["currentStock"], "50.00")
+        self.assertTrue(response.data["success"])
+        self.assertEqual(response.data["item"]["currentStock"], "50.00")
+        self.assertEqual(response.data["movement"]["stockAfter"], "50.00")
 
         # Adjust stock OUT
         payload_out = {
-            "type": "out",
-            "qty": "10.00",
+            "adjustmentType": "stockOut",
+            "quantity": "10.00",
+            "date": "2026-08-14",
             "reason": "Damaged Stock",
         }
-        response_out = self.client.post(f"/api/inventory/items/{item.id}/adjust_stock/", payload_out, format="json")
+        response_out = self.client.post(f"/api/inventory/items/{item.id}/adjust/", payload_out, format="json")
         self.assertEqual(response_out.status_code, status.HTTP_200_OK)
-        self.assertEqual(response_out.data["itemSummary"]["currentStock"], "40.00")
+        self.assertTrue(response_out.data["success"])
+        self.assertEqual(response_out.data["item"]["currentStock"], "40.00")
+        self.assertEqual(response_out.data["movement"]["stockAfter"], "40.00")
 
     def test_calculate_item_list_metrics_service(self):
         item = Item.objects.create(

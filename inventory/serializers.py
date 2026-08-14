@@ -273,33 +273,27 @@ class StockMovementHistorySerializer(serializers.ModelSerializer):
 
 class StockAdjustmentSerializer(serializers.Serializer):
     """
-    Serializer for manually adjusting stock on an item.
-    Supports either 'qty' or 'quantity' input fields for frontend compatibility.
-    Calls services.record_stock_movement under the hood.
+    Serializer for manually adjusting stock on an item (POST /api/inventory/items/{id}/adjust/).
+    Inputs: adjustmentType ('stockIn' | 'stockOut'), quantity, date, reason, and optional note.
+    Maps adjustmentType to internal movement_type ('in' | 'out').
+    Delegates atomic movement creation to services.record_stock_movement.
     """
-    type = serializers.ChoiceField(choices=['in', 'out'])
-    qty = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
-    quantity = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
-    reason = serializers.CharField(max_length=100)
-    date = serializers.DateField(required=False, allow_null=True)
-    notes = serializers.CharField(required=False, allow_blank=True, allow_null=True)
-
-    def validate(self, data):
-        qty = data.get('qty') or data.get('quantity')
-        if qty is None or qty <= Decimal('0.00'):
-            raise serializers.ValidationError({"qty": "Quantity must be greater than zero."})
-        data['final_quantity'] = qty
-        return data
+    adjustmentType = serializers.ChoiceField(choices=['stockIn', 'stockOut'], required=True)
+    quantity = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal('0.01'), required=True)
+    date = serializers.DateField(required=True)
+    reason = serializers.CharField(max_length=100, required=True)
+    note = serializers.CharField(max_length=255, required=False, allow_blank=True, allow_null=True)
 
     def save_adjustment(self, item: Item) -> StockMovement:
-        validated_data = self.validated_data
+        data = self.validated_data
+        movement_type = 'in' if data['adjustmentType'] == 'stockIn' else 'out'
         movement = services.record_stock_movement(
             item=item,
-            movement_type=validated_data['type'],
-            quantity=validated_data['final_quantity'],
-            reason=validated_data['reason'],
-            date=validated_data.get('date'),
-            notes=validated_data.get('notes'),
+            movement_type=movement_type,
+            quantity=data['quantity'],
+            reason=data['reason'],
+            date=data['date'],
+            notes=data.get('note'),
             ref_type='manual'
         )
         return movement

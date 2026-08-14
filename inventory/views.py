@@ -159,36 +159,31 @@ class ItemViewSet(viewsets.ModelViewSet):
         instance.is_deleted = True
         instance.save()
 
-    @action(detail=True, methods=['post'], url_path='adjust_stock')
-    def adjust_stock(self, request, pk=None):
+    @swagger_auto_schema(
+        operation_description="Adjust stock level (stockIn / stockOut) for a specific item.",
+        request_body=StockAdjustmentSerializer,
+    )
+    @action(detail=True, methods=['post'], url_path='adjust')
+    def adjust(self, request, pk=None):
         item = self.get_object()
         serializer = StockAdjustmentSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         movement = serializer.save_adjustment(item)
-        item_summary = services.calculate_item_summary(item)
-        formatted_summary = {
-            "currentStock": f"{item_summary['current_stock']:.2f}",
-            "totalIn": f"{item_summary['total_in']:.2f}",
-            "totalOut": f"{item_summary['total_out']:.2f}",
-            "stockValue": f"{item_summary['stock_value']:.2f}",
-            "profitPerUnit": f"{item_summary['profit_per_unit']:.2f}",
-            "profitMarginPct": item_summary["profit_margin_pct"],
-            "stockStatus": item_summary["stock_status"],
-        }
+        summary = services.calculate_item_summary(item)
         return Response(
             {
+                "success": True,
                 "message": "Stock adjusted successfully.",
-                "itemSummary": formatted_summary,
-                "item_summary": formatted_summary,  # Backwards compatibility alias
-                "movement": StockMovementSerializer(movement).data
+                "item": {
+                    "id": item.id,
+                    "itemCode": item.item_code,
+                    "currentStock": f"{summary['current_stock']:.2f}",
+                    "stockStatus": summary["stock_status"]
+                },
+                "movement": StockMovementHistorySerializer(movement).data
             },
             status=status.HTTP_200_OK
         )
-
-    @action(detail=True, methods=['post'], url_path='adjust')
-    def adjust(self, request, pk=None):
-        """Alias for adjust_stock for frontend compatibility."""
-        return self.adjust_stock(request, pk)
 
     @swagger_auto_schema(
         operation_description="Retrieve stock movement history for a specific item with optional date range filtering.",
@@ -250,40 +245,3 @@ class ItemViewSet(viewsets.ModelViewSet):
             "totalOut": f"{summary['total_out']:.2f}",
         }
         return Response(response_data)
-
-    @action(detail=True, methods=['get'], url_path='movements')
-    def movements(self, request, pk=None):
-        """Alias for history action for frontend compatibility."""
-        return self.history(request, pk)
-
-
-class StockMovementViewSet(viewsets.ReadOnlyModelViewSet):
-    """
-    ReadOnly ViewSet for viewing global stock movement audit logs.
-    """
-    queryset = StockMovement.objects.select_related('item').filter(item__is_deleted=False).order_by('-created_at', '-id')
-    serializer_class = StockMovementSerializer
-    permission_classes = [permissions.IsAuthenticated]
-
-    def get_queryset(self):
-        qs = super().get_queryset()
-        params = self.request.query_params
-
-        item_id = params.get('item')
-        if item_id:
-            qs = qs.filter(item_id=item_id)
-
-        movement_type = params.get('type')
-        if movement_type in ['in', 'out']:
-            qs = qs.filter(type=movement_type)
-
-        search = params.get('search', '').strip()
-        if search:
-            qs = qs.filter(
-                Q(item__name__icontains=search) |
-                Q(item__item_code__icontains=search) |
-                Q(reason__icontains=search) |
-                Q(notes__icontains=search)
-            )
-
-        return qs
