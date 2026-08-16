@@ -73,8 +73,11 @@ urlpatterns = [
     path("api/settings/backup/restore/", RestoreBackupView.as_view(), name="restore_backup"),
     path("api/", include(router.urls)),
     # Module APIs
+    path("api/inventory/", include("inventory.urls")),
     path("api/sales/", include("sales.urls")),
     path("api/purchase/", include("purchase.urls")),
+    path("api/employees/", include("employees.urls")),
+    path("api/attendance/", include("employees.attendance_urls")),
     path("api/dashboard/", include("dashboard.urls")),
     # Interactive API documentation
     path(

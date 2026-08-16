@@ -366,11 +366,17 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                     {"status": "Cannot revert or delete Sales Invoice because payments/advances are attached to it."}
                 )
 
-        # 1. Absolute Hard Lock: Reject any modification if the invoice is already 'Saved'
+        # 1. Hard Lock: Reject any modification if the invoice is already 'Saved' EXCEPT if it has zero stock movements (stuck invoice)
         if self.instance and self.instance.status == 'Saved':
-            raise serializers.ValidationError(
-                {"invoiceStatus": "Saved invoices are locked and cannot be modified. To make changes, delete the invoice to reverse balances and recreate it."}
-            )
+            from inventory.models import StockMovement
+            has_stock_movements = StockMovement.objects.filter(
+                reference_type='sales_invoice',
+                reference_id=self.instance.id
+            ).exists()
+            if has_stock_movements:
+                raise serializers.ValidationError(
+                    {"invoiceStatus": "Saved invoices are locked and cannot be modified. To make changes, delete the invoice to reverse balances and recreate it."}
+                )
 
         # 2. Extract or resolve customer and payment term for creation or update instances
         customer = attrs.get('customer')
@@ -464,6 +470,44 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                                      f"Payment term must be 'Cash' as no new debt is created."}
                 )
 
+        # 7. Stock availability pre-validation if saving or transitioning to 'Saved'
+        target_status = attrs.get('status') or attrs.get('invoiceStatus')
+        if not target_status and self.instance:
+            target_status = self.instance.status
+
+        if target_status == 'Saved':
+            from inventory.models import Item, StockMovement
+            from inventory.services import get_item_current_stock
+            from django.db import models
+
+            for item in items_list:
+                is_dict = isinstance(item, dict)
+                name_str = item.get('item_name') if is_dict else getattr(item, 'item_name', '')
+                req_qty = Decimal(str(item.get('quantity', 0) if is_dict else getattr(item, 'quantity', 0)))
+
+                inv_item = Item.objects.filter(
+                    models.Q(name__iexact=name_str) | models.Q(item_code__iexact=name_str),
+                    is_deleted=False
+                ).first()
+                if not inv_item:
+                    inv_item = Item.objects.filter(name__icontains=name_str, is_deleted=False).first()
+
+                if inv_item:
+                    avail_stock = get_item_current_stock(inv_item)
+                    if self.instance and self.instance.status == 'Saved':
+                        prev_movement = StockMovement.objects.filter(
+                            reference_type='sales_invoice',
+                            reference_id=self.instance.id,
+                            item=inv_item
+                        ).first()
+                        if prev_movement:
+                            avail_stock += prev_movement.quantity
+
+                    if req_qty > avail_stock:
+                        raise serializers.ValidationError({
+                            "detail": f"Insufficient stock for '{inv_item.name}'. Available: {avail_stock:.2f}, Requested: {req_qty:.2f}"
+                        })
+
         return attrs
 
     def _apply_invoice_balance_effects(self, invoice, original_paid_amount):
@@ -529,31 +573,37 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                 invoice.advance_applied = Decimal('0.00')
                 invoice.save(update_fields=['paid_amount', 'advance_applied'])
 
+        from inventory.services import reverse_document_stock
+        reverse_document_stock('sales_invoice', invoice.id)
+
     def create(self, validated_data: dict) -> SalesInvoice:
         items_data = validated_data.pop("items")
         customer_data = validated_data.pop("customer")
 
-        if isinstance(customer_data, dict) and customer_data.get('is_new_customer'):
-            customer_data.pop('is_new_customer', None)
-            from sales.utils import get_or_create_customer_from_data
-            customer = get_or_create_customer_from_data(customer_data)
-        else:
-            customer = customer_data
+        with transaction.atomic():
+            if isinstance(customer_data, dict) and customer_data.get('is_new_customer'):
+                customer_data.pop('is_new_customer', None)
+                from sales.utils import get_or_create_customer_from_data
+                customer = get_or_create_customer_from_data(customer_data)
+            else:
+                customer = customer_data
 
-        invoice = SalesInvoice.objects.create(customer=customer, **validated_data)
-        original_paid_amount = invoice.paid_amount
+            invoice = SalesInvoice.objects.create(customer=customer, **validated_data)
+            original_paid_amount = invoice.paid_amount
 
-        for item_data in items_data:
-            SalesItem.objects.create(invoice=invoice, **item_data)
+            for item_data in items_data:
+                SalesItem.objects.create(invoice=invoice, **item_data)
 
-        if (invoice.paid_amount > 0 or invoice.advance_applied > 0) and invoice.status == 'Draft':
-            invoice.status = 'Saved'
-            invoice.save(update_fields=['status'])
+            if (invoice.paid_amount > 0 or invoice.advance_applied > 0) and invoice.status == 'Draft':
+                invoice.status = 'Saved'
+                invoice.save(update_fields=['status'])
 
-        if invoice.status == 'Saved':
-            # Pull freshly calculated database fields before running accounting side-effects
-            invoice.refresh_from_db()
-            self._apply_invoice_balance_effects(invoice, original_paid_amount)
+            if invoice.status == 'Saved':
+                # Pull freshly calculated database fields before running accounting side-effects
+                invoice.refresh_from_db()
+                self._apply_invoice_balance_effects(invoice, original_paid_amount)
+                from inventory.services import process_sales_invoice_stock
+                process_sales_invoice_stock(invoice)
 
         return invoice
 
@@ -562,32 +612,39 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         customer_data = validated_data.pop("customer", None)
         old_status = instance.status
 
-        if customer_data is not None:
-            if isinstance(customer_data, dict) and customer_data.get('is_new_customer'):
-                customer_data.pop('is_new_customer', None)
-                from sales.utils import get_or_create_customer_from_data
-                customer = get_or_create_customer_from_data(customer_data)
-            else:
-                customer = customer_data
-            instance.customer = customer
+        with transaction.atomic():
+            if customer_data is not None:
+                if isinstance(customer_data, dict) and customer_data.get('is_new_customer'):
+                    customer_data.pop('is_new_customer', None)
+                    from sales.utils import get_or_create_customer_from_data
+                    customer = get_or_create_customer_from_data(customer_data)
+                else:
+                    customer = customer_data
+                instance.customer = customer
 
-        for attr, value in validated_data.items():
-            setattr(instance, attr, value)
-        instance.save()
+            for attr, value in validated_data.items():
+                setattr(instance, attr, value)
+            instance.save()
 
-        if (instance.paid_amount > 0 or instance.advance_applied > 0) and instance.status == 'Draft':
-            instance.status = 'Saved'
-            instance.save(update_fields=['status'])
+            if (instance.paid_amount > 0 or instance.advance_applied > 0) and instance.status == 'Draft':
+                instance.status = 'Saved'
+                instance.save(update_fields=['status'])
 
-        if items_data is not None:
-            instance.items.all().delete()
-            for item_data in items_data:
-                SalesItem.objects.create(invoice=instance, **item_data)
+            if items_data is not None:
+                instance.items.all().delete()
+                for item_data in items_data:
+                    SalesItem.objects.create(invoice=instance, **item_data)
 
-        if old_status != 'Saved' and instance.status == 'Saved':
-            instance.refresh_from_db()
-            original_paid_amount = instance.paid_amount
-            self._apply_invoice_balance_effects(instance, original_paid_amount)
+            if old_status != 'Saved' and instance.status == 'Saved':
+                instance.refresh_from_db()
+                original_paid_amount = instance.paid_amount
+                self._apply_invoice_balance_effects(instance, original_paid_amount)
+                from inventory.services import process_sales_invoice_stock
+                process_sales_invoice_stock(instance)
+            elif instance.status == 'Saved':
+                from inventory.services import process_sales_invoice_stock, reverse_document_stock
+                reverse_document_stock('sales_invoice', instance.id)
+                process_sales_invoice_stock(instance)
 
         return instance
 
@@ -1152,17 +1209,19 @@ class SalesReturnSerializer(serializers.ModelSerializer):
                     category="Sales Return Cash Refund",
                     notes__contains=sales_return.return_number
                 ).delete()
-            return
+        else:
+            customer = Customer.objects.select_for_update().get(pk=sales_return.customer_id)
 
-        customer = Customer.objects.select_for_update().get(pk=sales_return.customer_id)
+            if sales_return.applied_to_advance > 0:
+                customer.advance_balance -= sales_return.applied_to_advance
 
-        if sales_return.applied_to_advance > 0:
-            customer.advance_balance -= sales_return.applied_to_advance
+            if sales_return.applied_to_credit > 0:
+                customer.credit_balance += sales_return.applied_to_credit
 
-        if sales_return.applied_to_credit > 0:
-            customer.credit_balance += sales_return.applied_to_credit
+            customer.save(update_fields=['credit_balance', 'advance_balance'])
 
-        customer.save(update_fields=['credit_balance', 'advance_balance'])
+        from inventory.services import reverse_document_stock
+        reverse_document_stock('sales_return', sales_return.id)
 
     # ── Create / Update ─────────────────────────────────────────────
 
@@ -1182,6 +1241,8 @@ class SalesReturnSerializer(serializers.ModelSerializer):
             if sales_return.status == 'Saved':
                 sales_return.refresh_from_db()
                 self._apply_return_balance_effects(sales_return)
+                from inventory.services import process_sales_return_stock
+                process_sales_return_stock(sales_return)
 
         return sales_return
 
@@ -1202,5 +1263,11 @@ class SalesReturnSerializer(serializers.ModelSerializer):
             if old_status != 'Saved' and instance.status == 'Saved':
                 instance.refresh_from_db()
                 self._apply_return_balance_effects(instance)
+                from inventory.services import process_sales_return_stock
+                process_sales_return_stock(instance)
+            elif instance.status == 'Saved':
+                from inventory.services import process_sales_return_stock, reverse_document_stock
+                reverse_document_stock('sales_return', instance.id)
+                process_sales_return_stock(instance)
 
         return instance
