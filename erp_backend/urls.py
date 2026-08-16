@@ -76,6 +76,8 @@ urlpatterns = [
     path("api/inventory/", include("inventory.urls")),
     path("api/sales/", include("sales.urls")),
     path("api/purchase/", include("purchase.urls")),
+    path("api/employees/", include("employees.urls")),
+    path("api/attendance/", include("employees.attendance_urls")),
     path("api/dashboard/", include("dashboard.urls")),
     # Interactive API documentation
     path(

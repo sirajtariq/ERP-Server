@@ -44,6 +44,7 @@ INSTALLED_APPS = [
     "inventory.apps.InventoryConfig",
     "sales.apps.SalesConfig",
     "purchase.apps.PurchaseConfig",
+    "employees.apps.EmployeesConfig",
     "dashboard",
 ]
 
