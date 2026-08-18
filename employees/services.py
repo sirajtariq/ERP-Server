@@ -1,7 +1,9 @@
+import calendar
 import datetime
 from decimal import Decimal, ROUND_HALF_UP
+from django.conf import settings
 from django.db import transaction
-from django.db.models import Sum, Avg, Q, F
+from django.db.models import Sum
 from django.utils import timezone
 
 from employees.models import (
@@ -12,6 +14,17 @@ from employees.models import (
     EmployeeSalary,
     SalaryPayment,
 )
+
+
+DAY_MAP = {
+    "monday": 0, "mon": 0,
+    "tuesday": 1, "tue": 1,
+    "wednesday": 2, "wed": 2,
+    "thursday": 3, "thu": 3,
+    "friday": 4, "fri": 4,
+    "saturday": 5, "sat": 5,
+    "sunday": 6, "sun": 6,
+}
 
 
 def _quantize_decimal(value: Decimal) -> Decimal:
@@ -68,13 +81,79 @@ def num_to_words(number) -> str:
     return words.strip() + " Only"
 
 
+def get_configured_weekly_off_days() -> list:
+    """
+    Returns list of integer weekdays (0=Mon, 1=Tue, ..., 4=Fri, 5=Sat, 6=Sun) representing weekly off days.
+    Checks Django settings override first, or BusinessSettings DB, defaulting to [4] (Friday).
+    """
+    if hasattr(settings, "WEEKLY_OFF_DAYS") and settings.WEEKLY_OFF_DAYS is not None:
+        off_days = settings.WEEKLY_OFF_DAYS
+    else:
+        off_days = None
+        try:
+            from erp_backend.models import BusinessSettings
+            biz = BusinessSettings.get_solo()
+            if hasattr(biz, "weekly_off_days") and biz.weekly_off_days:
+                off_days = biz.weekly_off_days
+        except Exception:
+            pass
+
+    if not off_days:
+        off_days = [4]
+
+    if not isinstance(off_days, (list, tuple)):
+        off_days = [off_days]
+
+    result = []
+    for item in off_days:
+        if isinstance(item, int) and 0 <= item <= 6:
+            result.append(item)
+        elif isinstance(item, str):
+            clean_item = item.strip().lower()
+            if clean_item in DAY_MAP:
+                result.append(DAY_MAP[clean_item])
+
+    return result if result else [4]
+
+
+def get_configured_salary_calculation_basis() -> str:
+    """
+    Returns configured salary calculation basis ('working_days', 'fixed_30', or 'month_days').
+    Checks Django settings override first, or BusinessSettings DB, defaulting to 'working_days'.
+    """
+    if hasattr(settings, "SALARY_CALCULATION_BASIS") and settings.SALARY_CALCULATION_BASIS is not None:
+        return settings.SALARY_CALCULATION_BASIS
+
+    try:
+        from erp_backend.models import BusinessSettings
+        biz = BusinessSettings.get_solo()
+        if hasattr(biz, "salary_calculation_basis") and biz.salary_calculation_basis:
+            return biz.salary_calculation_basis
+    except Exception:
+        pass
+
+    return "working_days"
+
+
+def get_advance_remaining_amount(advance: SalaryAdvance) -> Decimal:
+    """Zero math helper: calculates remaining balance of a SalaryAdvance instance."""
+    diff = advance.amount - advance.recovered_amount
+    return _quantize_decimal(diff) if diff > Decimal("0.00") else Decimal("0.00")
+
+
+def get_salary_balance_remaining(salary: EmployeeSalary) -> Decimal:
+    """Zero math helper: calculates remaining balance of an EmployeeSalary instance."""
+    diff = salary.net_salary - salary.amount_paid
+    return _quantize_decimal(diff) if diff > Decimal("0.00") else Decimal("0.00")
+
+
 def calculate_payroll_global_kpis() -> dict:
     """
     Computes global KPI card summaries for active non-deleted employees:
     - activeEmployees: count of active employees
     - monthlyPayroll: total current_salary of active employees
     - averageSalary: average current_salary of active employees
-    - advanceOutstanding: total unrecovered advance balance across all employees
+    - advanceOutstanding: total unrecovered advance balance across all active non-deleted employees
     """
     active_qs = Employee.objects.filter(status="active", is_deleted=False)
     active_count = active_qs.count()
@@ -87,7 +166,6 @@ def calculate_payroll_global_kpis() -> dict:
     else:
         avg_salary = Decimal("0.00")
 
-    # Advance outstanding
     unrecovered_advances = SalaryAdvance.objects.filter(
         employee__is_deleted=False
     ).exclude(status="recovered")
@@ -110,7 +188,7 @@ def calculate_payroll_global_kpis() -> dict:
 
 def calculate_employee_advance_balance(employee: Employee) -> Decimal:
     """
-    Computes the total outstanding unrecovered salary advances for an employee.
+    Computes total outstanding unrecovered salary advances for an employee.
     """
     advances = SalaryAdvance.objects.filter(
         employee=employee,
@@ -127,12 +205,25 @@ def calculate_employee_advance_balance(employee: Employee) -> Decimal:
 def calculate_month_attendance_summary(employee: Employee, month: int, year: int) -> dict:
     """
     Analyzes attendance records for an employee for the given month and year:
-    - totalWorkingDays (default 30)
-    - presentDays, absentDays, halfDays, paidLeaves, unpaidLeaves
-    - perDayRate = current_salary / totalWorkingDays
-    - attendanceDeduction = (absentDays * perDayRate) + (halfDays * perDayRate / 2)
+    - Dynamic weekly off day evaluation (defaulting to Friday=4).
+    - month_days, weekly_offs_count, working_days = month_days - weekly_offs_count.
+    - Counts for present, absent, half_paid, half_unpaid, leave_paid, leave_unpaid, not_marked.
+    - per_day_rate = current_salary / working_days if working_days > 0 else 0.
+    - absent_deduction = absent_days * per_day_rate
+    - half_unpaid_deduction = half_unpaid_days * (per_day_rate / 2)
+    - leave_unpaid_deduction = leave_unpaid_days * per_day_rate
+    - attendance_deduction_total = absent_deduction + half_unpaid_deduction + leave_unpaid_deduction
     """
-    total_working_days = 30
+    month_days = calendar.monthrange(year, month)[1]
+    configured_off_days = get_configured_weekly_off_days()
+
+    weekly_offs_count = 0
+    for day in range(1, month_days + 1):
+        d = datetime.date(year, month, day)
+        if d.weekday() in configured_off_days:
+            weekly_offs_count += 1
+
+    working_days = month_days - weekly_offs_count
     records = Attendance.objects.filter(
         employee=employee,
         date__year=year,
@@ -140,27 +231,57 @@ def calculate_month_attendance_summary(employee: Employee, month: int, year: int
     )
 
     present_days = records.filter(status="present").count()
-    absent_days = records.filter(status__in=["absent", "unpaid_leave"]).count()
-    half_days = records.filter(status="half_day").count()
-    paid_leaves = records.filter(status="paid_leave").count()
+    absent_days = records.filter(status="absent").count()
+    half_paid_days = records.filter(status="half_paid").count()
+    half_unpaid_days = records.filter(status__in=["half_unpaid", "half_day"]).count()
+    leave_paid_days = records.filter(status__in=["leave_paid", "paid_leave"]).count()
+    leave_unpaid_days = records.filter(status__in=["leave_unpaid", "unpaid_leave"]).count()
 
-    per_day_rate = _quantize_decimal(employee.current_salary / Decimal(total_working_days))
-    
-    # attendanceDeduction = (absent_days * per_day_rate) + (half_days * per_day_rate / 2)
-    absent_deduction = Decimal(absent_days) * per_day_rate
-    half_day_deduction = Decimal(half_days) * (per_day_rate / Decimal(2))
-    attendance_deduction = _quantize_decimal(absent_deduction + half_day_deduction)
+    marked_days = (
+        present_days + absent_days + half_paid_days + half_unpaid_days + leave_paid_days + leave_unpaid_days
+    )
+    not_marked_days = max(0, working_days - marked_days)
 
-    effective_absent_days = _quantize_decimal(Decimal(absent_days) + (Decimal(half_days) * Decimal("0.5")))
+    calc_basis = get_configured_salary_calculation_basis()
+    if calc_basis == "fixed_30":
+        divisor = Decimal("30")
+    elif calc_basis == "month_days":
+        divisor = Decimal(str(month_days))
+    else:
+        divisor = Decimal(str(working_days)) if working_days > 0 else Decimal("30")
+
+    if divisor > Decimal("0.00"):
+        per_day_rate = (employee.current_salary / divisor).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    else:
+        per_day_rate = Decimal("0.00")
+
+    absent_deduction = (Decimal(absent_days) * per_day_rate).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    half_unpaid_deduction = (Decimal(half_unpaid_days) * (per_day_rate / Decimal("2"))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    leave_unpaid_deduction = (Decimal(leave_unpaid_days) * per_day_rate).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    attendance_deduction = _quantize_decimal(absent_deduction + half_unpaid_deduction + leave_unpaid_deduction)
 
     return {
-        "totalWorkingDays": total_working_days,
+        "monthDays": month_days,
+        "weeklyOffs": weekly_offs_count,
+        "fridaysCount": weekly_offs_count,
+        "fridaysOffDays": weekly_offs_count,
+        "workingDays": working_days,
+        "totalWorkingDays": working_days,
         "presentDays": present_days,
-        "absentDays": effective_absent_days,
+        "absentDays": Decimal(absent_days),
         "rawAbsentDays": absent_days,
-        "halfDays": half_days,
-        "paidLeaves": paid_leaves,
+        "halfPaidDays": half_paid_days,
+        "halfUnpaidDays": Decimal(half_unpaid_days),
+        "halfDays": half_unpaid_days,
+        "leavePaidDays": leave_paid_days,
+        "paidLeaves": leave_paid_days,
+        "leaveUnpaidDays": Decimal(leave_unpaid_days),
+        "unpaidLeaves": leave_unpaid_days,
+        "notMarkedDays": not_marked_days,
         "perDayRate": per_day_rate,
+        "absentDeduction": absent_deduction,
+        "halfUnpaidDeduction": half_unpaid_deduction,
+        "leaveUnpaidDeduction": leave_unpaid_deduction,
         "attendanceDeduction": attendance_deduction,
     }
 
@@ -170,6 +291,7 @@ def process_fifo_advance_recovery(employee: Employee, deduction_amount: Decimal)
     """
     Loops through pending/partial SalaryAdvance records for the employee ordered by date, id ASC.
     Allocates deduction_amount sequentially to each advance record until fully recovered.
+    Executes inside transaction.atomic with select_for_update for concurrency safety.
     """
     deduction_amount = _quantize_decimal(Decimal(str(deduction_amount)))
     if deduction_amount <= Decimal("0.00"):
@@ -207,38 +329,40 @@ def process_fifo_advance_recovery(employee: Employee, deduction_amount: Decimal)
 @transaction.atomic
 def record_salary_payment(employee: Employee, payload: dict) -> EmployeeSalary:
     """
-    Records or updates a month's salary for an employee and optionally logs an installment payment.
+    Records or updates a month's salary for an employee and logs installment payment if provided.
     Calculates net_salary = current_salary + bonus - deductions - advance_deduction - attendance_deduction.
-    Executes inside transaction.atomic for concurrency safety.
+    Executes inside transaction.atomic with select_for_update on target records.
     """
     employee = Employee.objects.select_for_update().get(id=employee.id)
 
     month = int(payload.get("month"))
     year = int(payload.get("year"))
-    working_days = int(payload.get("workingDays", 30))
+
+    att_summary = calculate_month_attendance_summary(employee, month, year)
+    month_days = att_summary["monthDays"]
+    working_days = int(payload.get("workingDays", att_summary["workingDays"]))
+
+    absent_days = Decimal(str(payload.get("absentDays", att_summary["absentDays"])))
+    half_unpaid_days = Decimal(str(payload.get("halfUnpaidDays", att_summary["halfUnpaidDays"])))
+    leave_unpaid_days = Decimal(str(payload.get("leaveUnpaidDays", att_summary["leaveUnpaidDays"])))
 
     bonus = _quantize_decimal(Decimal(str(payload.get("bonus", "0.00"))))
     deductions = _quantize_decimal(Decimal(str(payload.get("deductions", "0.00"))))
     advance_deduction = _quantize_decimal(Decimal(str(payload.get("advanceDeduction", "0.00"))))
 
-    # Calculate attendance deduction from summary if absent_days or attendance_deduction is omitted
-    att_summary = calculate_month_attendance_summary(employee, month, year)
-    
     if "attendanceDeduction" in payload and payload["attendanceDeduction"] is not None:
         attendance_deduction = _quantize_decimal(Decimal(str(payload["attendanceDeduction"])))
-        absent_days = Decimal(str(payload.get("absentDays", att_summary["absentDays"])))
     else:
         attendance_deduction = att_summary["attendanceDeduction"]
-        absent_days = att_summary["absentDays"]
 
     # Calculate net salary
-    net_salary = _quantize_decimal(
-        employee.current_salary + bonus - deductions - advance_deduction - attendance_deduction
-    )
+    gross_earnings = employee.current_salary + bonus
+    total_deductions = attendance_deduction + deductions + advance_deduction
+    net_salary = _quantize_decimal(gross_earnings - total_deductions)
 
     slip_no = payload.get("slipNo")
     if not slip_no:
-        slip_no = f"PS-{year}{month:02d}-{employee.id:04d}"
+        slip_no = f"SS-{year}{month:02d}-{employee.emp_no}"
 
     salary_obj, created = EmployeeSalary.objects.select_for_update().get_or_create(
         employee=employee,
@@ -246,22 +370,31 @@ def record_salary_payment(employee: Employee, payload: dict) -> EmployeeSalary:
         year=year,
         defaults={
             "slip_no": slip_no,
-            "basic_salary": employee.current_salary,
+            "basic_salary": employee.basic_salary,
+            "current_salary": employee.current_salary,
             "working_days": working_days,
+            "month_days": month_days,
             "absent_days": absent_days,
+            "half_unpaid_days": half_unpaid_days,
+            "leave_unpaid_days": leave_unpaid_days,
             "attendance_deduction": attendance_deduction,
             "bonus": bonus,
             "deductions": deductions,
             "advance_deduction": advance_deduction,
             "net_salary": net_salary,
+            "amount_paid": Decimal("0.00"),
             "status": "pending",
         }
     )
 
     if not created:
-        salary_obj.basic_salary = employee.current_salary
+        salary_obj.basic_salary = employee.basic_salary
+        salary_obj.current_salary = employee.current_salary
         salary_obj.working_days = working_days
+        salary_obj.month_days = month_days
         salary_obj.absent_days = absent_days
+        salary_obj.half_unpaid_days = half_unpaid_days
+        salary_obj.leave_unpaid_days = leave_unpaid_days
         salary_obj.attendance_deduction = attendance_deduction
         salary_obj.bonus = bonus
         salary_obj.deductions = deductions
@@ -281,7 +414,7 @@ def record_salary_payment(employee: Employee, payload: dict) -> EmployeeSalary:
         paid_by = payload.get("paidBy", "Finance Manager")
         remarks = payload.get("remarks", "")
 
-        SalaryPayment.objects.create(
+        payment_obj = SalaryPayment.objects.create(
             salary=salary_obj,
             payment_date=payment_date,
             amount=payment_amount,
@@ -289,14 +422,28 @@ def record_salary_payment(employee: Employee, payload: dict) -> EmployeeSalary:
             paid_by=paid_by,
             remarks=remarks,
         )
+        try:
+            from purchase.services import record_auto_expense
+            record_auto_expense(
+                amount=payment_obj.amount,
+                date=payment_obj.payment_date,
+                category="Salary",
+                description=f"Salary Payment: {employee.name} ({employee.emp_no}) - {salary_obj.month}/{salary_obj.year}",
+                payment_method=payment_obj.payment_method,
+                paid_by=payment_obj.paid_by,
+                reference_type="salary_payment",
+                reference_id=payment_obj.id,
+            )
+        except Exception:
+            pass
 
-    # Re-evaluate status based on total payments
+    # Re-evaluate total payments and status
     total_paid_agg = salary_obj.payments.aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
-    total_paid = _quantize_decimal(total_paid_agg)
+    salary_obj.amount_paid = _quantize_decimal(total_paid_agg)
 
-    if total_paid >= salary_obj.net_salary and salary_obj.net_salary > Decimal("0.00"):
+    if salary_obj.amount_paid >= salary_obj.net_salary and salary_obj.net_salary > Decimal("0.00"):
         salary_obj.status = "paid"
-    elif total_paid > Decimal("0.00"):
+    elif salary_obj.amount_paid > Decimal("0.00"):
         salary_obj.status = "partial"
     else:
         salary_obj.status = "pending"
@@ -365,7 +512,7 @@ def toggle_employee_status(employee: Employee, payload: dict) -> Employee:
     """
     employee = Employee.objects.select_for_update().get(id=employee.id)
     new_status = payload.get("status")
-    
+
     if new_status not in ["active", "inactive"]:
         raise ValueError("Status must be either 'active' or 'inactive'.")
 
@@ -383,16 +530,16 @@ def toggle_employee_status(employee: Employee, payload: dict) -> Employee:
 def generate_payslip_data(salary_instance: EmployeeSalary) -> dict:
     """
     Produces formatted printable JSON payload for a payslip document.
-    Includes Company Info, Employee Meta, Attendance breakdown, Earnings, Deductions, Net Salary, Amount in Words.
+    Includes Company Info, Employee Meta, Attendance summary, Earnings, Deductions, Net Salary, Amount in Words.
     """
     employee = salary_instance.employee
-    total_paid_agg = salary_instance.payments.aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
-    paid_amount = _quantize_decimal(total_paid_agg)
-    balance_remaining = _quantize_decimal(salary_instance.net_salary - paid_amount)
+    paid_amount = _quantize_decimal(salary_instance.amount_paid)
+    balance_remaining = get_salary_balance_remaining(salary_instance)
 
     basic = _quantize_decimal(salary_instance.basic_salary)
+    curr_sal = _quantize_decimal(salary_instance.current_salary)
     bonus = _quantize_decimal(salary_instance.bonus)
-    total_earnings = _quantize_decimal(basic + bonus)
+    total_earnings = _quantize_decimal(curr_sal + bonus)
 
     att_ded = _quantize_decimal(salary_instance.attendance_deduction)
     adv_ded = _quantize_decimal(salary_instance.advance_deduction)
@@ -401,6 +548,8 @@ def generate_payslip_data(salary_instance: EmployeeSalary) -> dict:
 
     net_salary = _quantize_decimal(salary_instance.net_salary)
     amount_in_words = num_to_words(net_salary)
+
+    weekly_offs_count = max(0, salary_instance.month_days - salary_instance.working_days)
 
     return {
         "company": {
@@ -411,7 +560,7 @@ def generate_payslip_data(salary_instance: EmployeeSalary) -> dict:
         },
         "employee": {
             "id": employee.id,
-            "empNo": employee.emp_no,
+            "empId": employee.emp_no,
             "name": employee.name,
             "designation": employee.designation,
             "department": employee.department,
@@ -427,12 +576,17 @@ def generate_payslip_data(salary_instance: EmployeeSalary) -> dict:
             "status": salary_instance.status,
         },
         "attendance": {
+            "monthDays": salary_instance.month_days,
             "workingDays": salary_instance.working_days,
+            "weeklyOffs": weekly_offs_count,
             "absentDays": salary_instance.absent_days,
+            "halfUnpaidDays": salary_instance.half_unpaid_days,
+            "leaveUnpaidDays": salary_instance.leave_unpaid_days,
             "attendanceDeduction": att_ded,
         },
         "earnings": {
             "basicSalary": basic,
+            "currentSalary": curr_sal,
             "bonus": bonus,
             "totalEarnings": total_earnings,
         },
@@ -462,152 +616,420 @@ def generate_payslip_data(salary_instance: EmployeeSalary) -> dict:
     }
 
 
-def generate_employee_360_timeline(employee: Employee) -> dict:
+@transaction.atomic
+def bulk_record_attendance(date_val, records_list: list) -> list:
     """
-    Generates a full 360-degree timeline and aggregated detail object for an employee.
-    Contains personal details, salary statistics, advance balance, history tabs, and event stream.
+    Bulk saves or updates attendance records inside transaction.atomic.
+    """
+    saved_records = []
+    for rec in records_list:
+        emp_id = rec.get("employeeId")
+        try:
+            emp = Employee.objects.get(id=emp_id, is_deleted=False)
+        except Employee.DoesNotExist:
+            continue
+
+        att_obj, _ = Attendance.objects.update_or_create(
+            employee=emp,
+            date=date_val,
+            defaults={
+                "status": rec.get("status"),
+                "check_in": rec.get("checkIn"),
+                "check_out": rec.get("checkOut"),
+                "remarks": rec.get("remarks"),
+            }
+        )
+        saved_records.append(att_obj)
+    return saved_records
+
+
+def get_employee_360_overview(employee: Employee) -> dict:
+    """
+    Returns complete 360 overview for an employee, including header, topMetrics, tabBadges,
+    personalInfo, and salaryInfo.
     """
     advance_balance = calculate_employee_advance_balance(employee)
 
-    # Salaries history
-    salaries = EmployeeSalary.objects.filter(employee=employee).order_by("-year", "-month")
-    salary_list = []
-    total_salaries_paid = Decimal("0.00")
+    pending_salaries = EmployeeSalary.objects.filter(employee=employee, status__in=["pending", "partial"])
+    pending_salary_amount = Decimal("0.00")
+    for s in pending_salaries:
+        pending_salary_amount += get_salary_balance_remaining(s)
 
-    for s in salaries:
-        paid_agg = s.payments.aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
-        paid_amt = _quantize_decimal(paid_agg)
-        total_salaries_paid += paid_amt
-        salary_list.append({
-            "id": s.id,
-            "slipNo": s.slip_no,
-            "month": s.month,
-            "year": s.year,
-            "basicSalary": _quantize_decimal(s.basic_salary),
-            "workingDays": s.working_days,
-            "absentDays": s.absent_days,
-            "attendanceDeduction": _quantize_decimal(s.attendance_deduction),
-            "bonus": _quantize_decimal(s.bonus),
-            "deductions": _quantize_decimal(s.deductions),
-            "advanceDeduction": _quantize_decimal(s.advance_deduction),
-            "netSalary": _quantize_decimal(s.net_salary),
-            "paidAmount": paid_amt,
-            "balanceRemaining": _quantize_decimal(s.net_salary - paid_amt),
-            "status": s.status,
-            "createdAt": s.created_at,
-        })
+    increments_qs = EmployeeIncrement.objects.filter(employee=employee)
+    no_of_increments = increments_qs.count()
+    total_incremented = Decimal("0.00")
+    for inc in increments_qs:
+        total_incremented += inc.increment_amount
 
-    # Increments history
-    increments = EmployeeIncrement.objects.filter(employee=employee).order_by("-effective_date")
-    increment_list = [
-        {
-            "id": inc.id,
-            "effectiveDate": inc.effective_date,
-            "previousSalary": _quantize_decimal(inc.previous_salary),
-            "incrementAmount": _quantize_decimal(inc.increment_amount),
-            "newSalary": _quantize_decimal(inc.new_salary),
-            "approvedBy": inc.approved_by,
-            "reason": inc.reason,
-            "createdAt": inc.created_at,
-        }
-        for inc in increments
-    ]
+    salary_records_count = EmployeeSalary.objects.filter(employee=employee).count()
+    unpaid_salaries_count = pending_salaries.count()
+    advances_count = SalaryAdvance.objects.filter(employee=employee).count()
 
-    # Advances history
-    advances = SalaryAdvance.objects.filter(employee=employee).order_by("-date")
-    advance_list = [
-        {
-            "id": adv.id,
-            "date": adv.date,
-            "amount": _quantize_decimal(adv.amount),
-            "recoveredAmount": _quantize_decimal(adv.recovered_amount),
-            "remainingAmount": _quantize_decimal(adv.amount - adv.recovered_amount),
-            "paymentMethod": adv.payment_method,
-            "reason": adv.reason,
-            "status": adv.status,
-            "createdAt": adv.created_at,
-        }
-        for adv in advances
-    ]
-
-    # Recent attendances
-    recent_attendances = Attendance.objects.filter(employee=employee).order_by("-date")[:30]
-    attendance_list = [
-        {
-            "id": att.id,
-            "date": att.date,
-            "status": att.status,
-            "checkIn": att.check_in,
-            "checkOut": att.check_out,
-            "remarks": att.remarks,
-        }
-        for att in recent_attendances
-    ]
-
-    # Construct chronological 360 event stream timeline
-    timeline = []
-    # Joining event
-    if employee.joining_date:
-        timeline.append({
-            "type": "joining",
-            "date": employee.joining_date,
-            "title": "Employee Joined",
-            "description": f"Joined as {employee.designation} in {employee.department} department with basic salary of {_quantize_decimal(employee.basic_salary)}.",
-        })
-    # Increment events
-    for inc in increments:
-        timeline.append({
-            "type": "increment",
-            "date": inc.effective_date,
-            "title": f"Salary Increment: +{_quantize_decimal(inc.increment_amount)}",
-            "description": f"Salary increased from {_quantize_decimal(inc.previous_salary)} to {_quantize_decimal(inc.new_salary)}. Reason: {inc.reason}",
-        })
-    # Advance events
-    for adv in advances:
-        timeline.append({
-            "type": "advance",
-            "date": adv.date,
-            "title": f"Salary Advance Taken: {_quantize_decimal(adv.amount)}",
-            "description": f"Advance of {_quantize_decimal(adv.amount)} issued via {adv.payment_method}. Reason: {adv.reason}",
-        })
-    # Salary events
-    for s in salaries:
-        timeline.append({
-            "type": "salary",
-            "date": datetime.date(s.year, s.month, 1),
-            "title": f"Salary Generated for {s.month}/{s.year}",
-            "description": f"Net salary: {_quantize_decimal(s.net_salary)} (Status: {s.status.title()})",
-        })
-
-    # Sort timeline descending by date
-    timeline.sort(key=lambda x: str(x["date"]), reverse=True)
+    now = timezone.now()
+    current_month_absents = Attendance.objects.filter(
+        employee=employee,
+        date__year=now.year,
+        date__month=now.month,
+        status="absent"
+    ).count()
+    attendance_alert_badge = f"{current_month_absents}A" if current_month_absents > 0 else ""
 
     return {
-        "employee": {
+        "header": {
             "id": employee.id,
             "empNo": employee.emp_no,
             "name": employee.name,
             "designation": employee.designation,
             "department": employee.department,
-            "joiningDate": employee.joining_date,
-            "leavingDate": employee.leaving_date,
-            "rejoiningDate": employee.rejoining_date,
-            "basicSalary": _quantize_decimal(employee.basic_salary),
+            "status": employee.status,
+        },
+        "topMetrics": {
             "currentSalary": _quantize_decimal(employee.current_salary),
+            "pendingSalary": _quantize_decimal(pending_salary_amount),
+            "advanceBalance": advance_balance,
+            "salaryRecordsCount": salary_records_count,
+            "noOfIncrements": no_of_increments,
+        },
+        "tabBadges": {
+            "unpaidSalariesCount": unpaid_salaries_count,
+            "incrementsCount": no_of_increments,
+            "advancesCount": advances_count,
+            "attendanceAlertBadge": attendance_alert_badge,
+        },
+        "personalInfo": {
+            "empNo": employee.emp_no,
             "phone": employee.phone,
             "email": employee.email,
             "cnic": employee.cnic,
             "address": employee.address,
-            "status": employee.status,
-            "isDeleted": employee.is_deleted,
-            "createdAt": employee.created_at,
-            "updatedAt": employee.updated_at,
+            "joiningDate": employee.joining_date,
+            "leavingDate": employee.leaving_date,
+            "rejoiningDate": employee.rejoining_date,
         },
-        "advanceBalance": advance_balance,
-        "totalSalariesPaid": _quantize_decimal(total_salaries_paid),
-        "salaries": salary_list,
-        "increments": increment_list,
-        "advances": advance_list,
-        "attendances": attendance_list,
-        "timeline": timeline,
+        "salaryInfo": {
+            "basicSalary": _quantize_decimal(employee.basic_salary),
+            "currentSalary": _quantize_decimal(employee.current_salary),
+            "totalIncremented": _quantize_decimal(total_incremented),
+            "noOfIncrements": no_of_increments,
+        },
+    }
+
+
+def get_employee_salaries_tab_summary(employee: Employee) -> dict:
+    """
+    Returns summary metrics for an employee's salary history tab.
+    """
+    salaries = EmployeeSalary.objects.filter(employee=employee)
+    
+    total_paid = Decimal("0.00")
+    total_bonus = Decimal("0.00")
+    pending_salary = Decimal("0.00")
+    partial_pending_count = 0
+
+    for s in salaries:
+        paid_amt = _quantize_decimal(s.amount_paid)
+        bonus_amt = _quantize_decimal(s.bonus)
+        balance = get_salary_balance_remaining(s)
+
+        total_paid += paid_amt
+        total_bonus += bonus_amt
+
+        if s.status in ["pending", "partial"]:
+            pending_salary += balance
+            partial_pending_count += 1
+
+    return {
+        "totalPaid": _quantize_decimal(total_paid),
+        "totalBonus": _quantize_decimal(total_bonus),
+        "pendingSalary": _quantize_decimal(pending_salary),
+        "partialPendingCount": partial_pending_count,
+    }
+
+
+def get_employee_salaries_tab_data(employee: Employee) -> dict:
+    """
+    Returns salaries tab data including top summary cards and detailed month records with payments.
+    """
+    salaries = EmployeeSalary.objects.filter(employee=employee).order_by("-year", "-month")
+    
+    total_paid = Decimal("0.00")
+    total_bonus = Decimal("0.00")
+    pending_salary = Decimal("0.00")
+    partial_pending_count = 0
+
+    results = []
+    for s in salaries:
+        paid_amt = _quantize_decimal(s.amount_paid)
+        bonus_amt = _quantize_decimal(s.bonus)
+        balance = get_salary_balance_remaining(s)
+
+        total_paid += paid_amt
+        total_bonus += bonus_amt
+
+        if s.status in ["pending", "partial"]:
+            pending_salary += balance
+            partial_pending_count += 1
+
+        month_label = f"{calendar.month_name[s.month]} {s.year}"
+
+        payments_list = [
+            {
+                "id": p.id,
+                "paymentDate": p.payment_date,
+                "amount": _quantize_decimal(p.amount),
+                "paymentMethod": p.payment_method,
+                "paidBy": p.paid_by,
+                "remarks": p.remarks,
+            }
+            for p in s.payments.all()
+        ]
+
+        results.append({
+            "id": s.id,
+            "month": s.month,
+            "year": s.year,
+            "monthLabel": month_label,
+            "basicSalary": _quantize_decimal(s.basic_salary),
+            "currentSalary": _quantize_decimal(s.current_salary),
+            "workingDays": s.working_days,
+            "monthDays": s.month_days,
+            "absentDays": s.absent_days,
+            "halfUnpaidDays": s.half_unpaid_days,
+            "leaveUnpaidDays": s.leave_unpaid_days,
+            "attendanceDeduction": _quantize_decimal(s.attendance_deduction),
+            "bonus": bonus_amt,
+            "deductions": _quantize_decimal(s.deductions),
+            "advanceDeduction": _quantize_decimal(s.advance_deduction),
+            "netSalary": _quantize_decimal(s.net_salary),
+            "amountPaid": paid_amt,
+            "balanceRemaining": balance,
+            "status": s.status,
+            "payments": payments_list,
+        })
+
+    return {
+        "summary": {
+            "totalPaid": _quantize_decimal(total_paid),
+            "totalBonus": _quantize_decimal(total_bonus),
+            "pendingSalary": _quantize_decimal(pending_salary),
+            "partialPendingCount": partial_pending_count,
+        },
+        "results": results,
+    }
+
+
+def get_employee_increments_tab_summary(employee: Employee) -> dict:
+    """
+    Returns summary statistics for the employee salary increments tab.
+    """
+    increments = EmployeeIncrement.objects.filter(employee=employee)
+    total_incremented = Decimal("0.00")
+    for inc in increments:
+        total_incremented += inc.increment_amount
+
+    return {
+        "basicSalary": _quantize_decimal(employee.basic_salary),
+        "currentSalary": _quantize_decimal(employee.current_salary),
+        "totalIncremented": _quantize_decimal(total_incremented),
+        "noOfIncrements": increments.count(),
+    }
+
+
+def get_employee_increments_tab_data(employee: Employee) -> dict:
+    """
+    Returns increments tab data including top summary and list of serialized increment records.
+    """
+    increments = EmployeeIncrement.objects.filter(employee=employee).order_by("-effective_date")
+    
+    total_incremented = Decimal("0.00")
+    results = []
+    for inc in increments:
+        inc_amt = _quantize_decimal(inc.increment_amount)
+        total_incremented += inc_amt
+        results.append({
+            "id": inc.id,
+            "effectiveDate": inc.effective_date,
+            "previousSalary": _quantize_decimal(inc.previous_salary),
+            "incrementAmount": inc_amt,
+            "newSalary": _quantize_decimal(inc.new_salary),
+            "reason": inc.reason,
+            "approvedBy": inc.approved_by,
+            "createdAt": inc.created_at,
+        })
+
+    return {
+        "summary": {
+            "basicSalary": _quantize_decimal(employee.basic_salary),
+            "currentSalary": _quantize_decimal(employee.current_salary),
+            "totalIncremented": _quantize_decimal(total_incremented),
+            "noOfIncrements": len(results),
+        },
+        "results": results,
+    }
+
+
+def get_employee_advances_tab_summary(employee: Employee) -> dict:
+    """
+    Returns summary statistics for the employee salary advances tab.
+    """
+    advances = SalaryAdvance.objects.filter(employee=employee)
+
+    total_given = Decimal("0.00")
+    total_recovered = Decimal("0.00")
+
+    for adv in advances:
+        total_given += adv.amount
+        total_recovered += adv.recovered_amount
+
+    outstanding_balance = calculate_employee_advance_balance(employee)
+
+    return {
+        "outstandingBalance": outstanding_balance,
+        "totalGiven": _quantize_decimal(total_given),
+        "totalRecovered": _quantize_decimal(total_recovered),
+    }
+
+
+def get_employee_advances_tab_data(employee: Employee) -> dict:
+    """
+    Returns advances tab data including outstanding balance, total given, total recovered, and advances list.
+    """
+    advances = SalaryAdvance.objects.filter(employee=employee).order_by("-date")
+
+    total_given = Decimal("0.00")
+    total_recovered = Decimal("0.00")
+    results = []
+
+    for adv in advances:
+        amt = _quantize_decimal(adv.amount)
+        rec = _quantize_decimal(adv.recovered_amount)
+        rem = get_advance_remaining_amount(adv)
+
+        total_given += amt
+        total_recovered += rec
+
+        results.append({
+            "id": adv.id,
+            "date": adv.date,
+            "amount": amt,
+            "recoveredAmount": rec,
+            "remainingAmount": rem,
+            "paymentMethod": adv.payment_method,
+            "reason": adv.reason,
+            "status": adv.status,
+            "createdAt": adv.created_at,
+        })
+
+    outstanding_balance = calculate_employee_advance_balance(employee)
+
+    return {
+        "summary": {
+            "outstandingBalance": outstanding_balance,
+            "totalGiven": _quantize_decimal(total_given),
+            "totalRecovered": _quantize_decimal(total_recovered),
+        },
+        "results": results,
+    }
+
+
+def get_employee_attendance_tab_data(employee: Employee, month: int = None, year: int = None) -> dict:
+    """
+    Constructs month calendar grid matrix, status counts, top cards, and daily logs list for an employee.
+    """
+    now = timezone.now().date()
+    if not month:
+        month = now.month
+    if not year:
+        year = now.year
+
+    off_days_list = get_configured_weekly_off_days()
+    _, month_days = calendar.monthrange(year, month)
+
+    att_qs = Attendance.objects.filter(employee=employee, date__year=year, date__month=month)
+    att_map = {att.date.day: att for att in att_qs}
+
+    present_count = 0
+    absent_count = 0
+    half_day_count = 0
+    leave_count = 0
+    off_days_count = 0
+    not_marked_count = 0
+
+    calendar_grid = []
+    logs = []
+
+    status_badge_map = {
+        "present": "P",
+        "absent": "A",
+        "half_paid": "½P",
+        "half_unpaid": "½U",
+        "leave_paid": "LP",
+        "leave_unpaid": "LU",
+    }
+
+    for day in range(1, month_days + 1):
+        date_obj = datetime.date(year, month, day)
+        day_of_week_idx = date_obj.weekday()  # 0=Mon ... 6=Sun
+        day_name = date_obj.strftime("%a")
+        is_off = day_of_week_idx in off_days_list
+
+        att_record = att_map.get(day)
+        if att_record:
+            st = att_record.status
+            badge = status_badge_map.get(st, "P")
+
+            if st == "present":
+                present_count += 1
+            elif st == "absent":
+                absent_count += 1
+            elif st in ["half_paid", "half_unpaid"]:
+                half_day_count += 1
+            elif st in ["leave_paid", "leave_unpaid"]:
+                leave_count += 1
+
+            logs.append({
+                "id": att_record.id,
+                "date": date_obj,
+                "dayName": day_name,
+                "status": st,
+                "statusCode": st,
+                "remarks": att_record.remarks,
+                "checkIn": att_record.check_in,
+                "checkOut": att_record.check_out,
+            })
+        else:
+            if is_off:
+                st = "weekly_off"
+                badge = "OFF"
+                off_days_count += 1
+            else:
+                st = "not_marked"
+                badge = "-"
+                not_marked_count += 1
+
+        calendar_grid.append({
+            "date": date_obj,
+            "day": day,
+            "dayOfWeek": day_name,
+            "status": st,
+            "badge": badge,
+            "isWeeklyOff": is_off,
+        })
+
+    return {
+        "cards": {
+            "totalAbsents": absent_count,
+            "totalLeaves": leave_count,
+            "totalHalfDays": half_day_count,
+        },
+        "summary": {
+            "presentCount": present_count,
+            "absentCount": absent_count,
+            "halfDayCount": half_day_count,
+            "leaveCount": leave_count,
+            "offDaysCount": off_days_count,
+            "notMarkedCount": not_marked_count,
+        },
+        "calendarGrid": calendar_grid,
+        "logs": logs,
     }

@@ -355,6 +355,8 @@ class Expense(SoftDeleteModel):
     payment_method = models.CharField(max_length=50, blank=True)
     date = models.DateField(default=timezone.localdate)
     notes = models.TextField(blank=True)
+    reference_type = models.CharField(max_length=50, null=True, blank=True, db_index=True)
+    reference_id = models.PositiveIntegerField(null=True, blank=True, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

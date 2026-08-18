@@ -1,3 +1,4 @@
+import calendar
 from decimal import Decimal
 from rest_framework import serializers
 
@@ -13,7 +14,7 @@ import employees.services as services
 
 
 class EmployeeSerializer(serializers.ModelSerializer):
-    empNo = serializers.CharField(source="emp_no")
+    empId = serializers.CharField(source="emp_no", required=True)
     joiningDate = serializers.DateField(source="joining_date")
     leavingDate = serializers.DateField(source="leaving_date", required=False, allow_null=True)
     rejoiningDate = serializers.DateField(source="rejoining_date", required=False, allow_null=True)
@@ -27,7 +28,7 @@ class EmployeeSerializer(serializers.ModelSerializer):
         model = Employee
         fields = [
             "id",
-            "empNo",
+            "empId",
             "name",
             "designation",
             "department",
@@ -47,9 +48,13 @@ class EmployeeSerializer(serializers.ModelSerializer):
         ]
 
     def to_internal_value(self, data):
-        data = data.copy() if hasattr(data, 'copy') else dict(data)
-        for field in ['leavingDate', 'leaving_date', 'rejoiningDate', 'rejoining_date']:
-            if field in data and data[field] == '':
+        data = data.copy() if hasattr(data, "copy") else dict(data)
+        if "empId" in data and "emp_no" not in data:
+            data["emp_no"] = data["empId"]
+        elif "emp_id" in data and "emp_no" not in data:
+            data["emp_no"] = data["emp_id"]
+        for field in ["leavingDate", "leaving_date", "rejoiningDate", "rejoining_date", "joiningDate", "joining_date"]:
+            if field in data and data[field] == "":
                 data[field] = None
         return super().to_internal_value(data)
 
@@ -61,22 +66,47 @@ class EmployeeSerializer(serializers.ModelSerializer):
         return super().create(validated_data)
 
 
-class EmployeeListSerializer(EmployeeSerializer):
-    advanceBalance = serializers.SerializerMethodField()
+class EmployeeListSerializer(serializers.ModelSerializer):
+    empId = serializers.CharField(source="emp_no", read_only=True)
+    joiningDate = serializers.DateField(source="joining_date", read_only=True)
+    lastWorkingDate = serializers.DateField(source="leaving_date", read_only=True)
+    rejoiningDate = serializers.DateField(source="rejoining_date", read_only=True)
+    advance = serializers.SerializerMethodField()
+    salary = serializers.SerializerMethodField()
 
-    class Meta(EmployeeSerializer.Meta):
-        fields = EmployeeSerializer.Meta.fields + ["advanceBalance"]
+    class Meta:
+        model = Employee
+        fields = [
+            "id",
+            "empId",
+            "name",
+            "designation",
+            "department",
+            "joiningDate",
+            "salary",
+            "advance",
+            "status",
+            "lastWorkingDate",
+            "rejoiningDate",
+        ]
 
-    def get_advanceBalance(self, obj):
+    def get_advance(self, obj):
         return services.calculate_employee_advance_balance(obj)
+
+    def get_salary(self, obj):
+        return {
+            "basicSalary": services._quantize_decimal(obj.basic_salary),
+            "currentSalary": services._quantize_decimal(obj.current_salary),
+        }
 
 
 class AttendanceSerializer(serializers.ModelSerializer):
     employeeId = serializers.IntegerField(source="employee.id", read_only=True)
-    empNo = serializers.CharField(source="employee.emp_no", read_only=True)
+    empId = serializers.CharField(source="employee.emp_no", read_only=True)
     employeeName = serializers.CharField(source="employee.name", read_only=True)
     checkIn = serializers.TimeField(source="check_in", required=False, allow_null=True)
     checkOut = serializers.TimeField(source="check_out", required=False, allow_null=True)
+    createdAt = serializers.DateTimeField(source="created_at", read_only=True)
 
     class Meta:
         model = Attendance
@@ -84,19 +114,23 @@ class AttendanceSerializer(serializers.ModelSerializer):
             "id",
             "employee",
             "employeeId",
-            "empNo",
+            "empId",
             "employeeName",
             "date",
             "status",
             "checkIn",
             "checkOut",
             "remarks",
+            "createdAt",
         ]
 
 
 class BulkAttendanceItemSerializer(serializers.Serializer):
     employeeId = serializers.IntegerField()
-    status = serializers.ChoiceField(choices=["present", "absent", "half_day", "paid_leave", "unpaid_leave"])
+    status = serializers.ChoiceField(choices=[
+        "present", "absent", "half_paid", "half_unpaid", "leave_paid", "leave_unpaid",
+        "half_day", "paid_leave", "unpaid_leave" # backward compat
+    ])
     checkIn = serializers.TimeField(required=False, allow_null=True)
     checkOut = serializers.TimeField(required=False, allow_null=True)
     remarks = serializers.CharField(required=False, allow_null=True, allow_blank=True)
@@ -154,8 +188,7 @@ class SalaryAdvanceSerializer(serializers.ModelSerializer):
         read_only_fields = ["employee", "recoveredAmount", "remainingAmount", "status", "createdAt"]
 
     def get_remainingAmount(self, obj):
-        diff = obj.amount - obj.recovered_amount
-        return diff if diff > Decimal("0.00") else Decimal("0.00")
+        return services.get_advance_remaining_amount(obj)
 
 
 class SalaryPaymentSerializer(serializers.ModelSerializer):
@@ -182,14 +215,18 @@ class SalaryPaymentSerializer(serializers.ModelSerializer):
 class EmployeeSalarySerializer(serializers.ModelSerializer):
     slipNo = serializers.CharField(source="slip_no", read_only=True)
     basicSalary = serializers.DecimalField(source="basic_salary", max_digits=12, decimal_places=2, read_only=True)
+    currentSalary = serializers.DecimalField(source="current_salary", max_digits=12, decimal_places=2, read_only=True)
     workingDays = serializers.IntegerField(source="working_days", required=False, default=30)
+    monthDays = serializers.IntegerField(source="month_days", read_only=True)
     absentDays = serializers.DecimalField(source="absent_days", max_digits=4, decimal_places=1, read_only=True)
+    halfUnpaidDays = serializers.DecimalField(source="half_unpaid_days", max_digits=4, decimal_places=1, read_only=True)
+    leaveUnpaidDays = serializers.DecimalField(source="leave_unpaid_days", max_digits=4, decimal_places=1, read_only=True)
     attendanceDeduction = serializers.DecimalField(source="attendance_deduction", max_digits=12, decimal_places=2, read_only=True)
     advanceDeduction = serializers.DecimalField(source="advance_deduction", max_digits=12, decimal_places=2, required=False, default=Decimal("0.00"))
     netSalary = serializers.DecimalField(source="net_salary", max_digits=12, decimal_places=2, read_only=True)
-    payments = SalaryPaymentSerializer(many=True, read_only=True)
-    paidAmount = serializers.SerializerMethodField()
+    paidAmount = serializers.DecimalField(source="amount_paid", max_digits=12, decimal_places=2, read_only=True)
     balanceRemaining = serializers.SerializerMethodField()
+    payments = SalaryPaymentSerializer(many=True, read_only=True)
     createdAt = serializers.DateTimeField(source="created_at", read_only=True)
 
     class Meta:
@@ -201,38 +238,70 @@ class EmployeeSalarySerializer(serializers.ModelSerializer):
             "month",
             "year",
             "basicSalary",
+            "currentSalary",
             "workingDays",
+            "monthDays",
             "absentDays",
+            "halfUnpaidDays",
+            "leaveUnpaidDays",
             "attendanceDeduction",
             "bonus",
             "deductions",
             "advanceDeduction",
             "netSalary",
-            "status",
-            "payments",
             "paidAmount",
             "balanceRemaining",
+            "status",
+            "payments",
             "createdAt",
         ]
         read_only_fields = [
             "employee",
             "slipNo",
             "basicSalary",
+            "currentSalary",
+            "monthDays",
             "absentDays",
+            "halfUnpaidDays",
+            "leaveUnpaidDays",
             "attendanceDeduction",
             "netSalary",
+            "paidAmount",
             "status",
             "payments",
-            "paidAmount",
             "balanceRemaining",
             "createdAt",
         ]
 
-    def get_paidAmount(self, obj):
-        total = sum(p.amount for p in obj.payments.all()) if obj.id else Decimal("0.00")
-        return total
+    def get_balanceRemaining(self, obj):
+        return services.get_salary_balance_remaining(obj)
+
+
+class EmployeeSalaryTabSerializer(serializers.ModelSerializer):
+    monthLabel = serializers.SerializerMethodField()
+    netSalary = serializers.DecimalField(source="net_salary", max_digits=12, decimal_places=2)
+    bonus = serializers.DecimalField(max_digits=12, decimal_places=2)
+    amountPaid = serializers.DecimalField(source="amount_paid", max_digits=12, decimal_places=2)
+    balanceRemaining = serializers.SerializerMethodField()
+    payments = SalaryPaymentSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = EmployeeSalary
+        fields = [
+            "id",
+            "month",
+            "year",
+            "monthLabel",
+            "netSalary",
+            "bonus",
+            "amountPaid",
+            "balanceRemaining",
+            "status",
+            "payments",
+        ]
+
+    def get_monthLabel(self, obj):
+        return f"{calendar.month_name[obj.month]} {obj.year}"
 
     def get_balanceRemaining(self, obj):
-        paid = self.get_paidAmount(obj)
-        rem = obj.net_salary - paid
-        return rem if rem > Decimal("0.00") else Decimal("0.00")
+        return services.get_salary_balance_remaining(obj)
