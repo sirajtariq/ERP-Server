@@ -207,7 +207,7 @@ class EmployeeAPITestCase(TestCase):
 
     def test_create_employee(self):
         payload = {
-            "empNo": "EMP-101",
+            "empId": "EMP-101",
             "name": "Hamza Tariq",
             "designation": "Manager",
             "department": "Operations",
@@ -216,12 +216,25 @@ class EmployeeAPITestCase(TestCase):
         }
         res = self.client.post("/api/employees/", payload, format="json")
         self.assertEqual(res.status_code, status.HTTP_201_CREATED)
-        self.assertEqual(res.data["empNo"], "EMP-101")
+        self.assertEqual(res.data["empId"], "EMP-101")
         self.assertEqual(res.data["currentSalary"], "95000.00")
+
+    def test_create_employee_with_empid_payload(self):
+        payload = {
+            "empId": "EMP-201",
+            "name": "Noman Ejaz",
+            "designation": "Team Lead",
+            "department": "IT",
+            "joiningDate": "2026-02-01",
+            "basicSalary": "120000.00",
+        }
+        res = self.client.post("/api/employees/", payload, format="json")
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(res.data["empId"], "EMP-201")
 
     def test_create_employee_with_empty_string_dates(self):
         payload = {
-            "empNo": "EMP-102",
+            "empId": "EMP-102",
             "name": "Usman Ali",
             "designation": "Developer",
             "department": "IT",
@@ -310,7 +323,7 @@ class EmployeeSerializerTestCase(TestCase):
     def test_to_internal_value_empty_string_conversion(self):
         from employees.serializers import EmployeeSerializer
         payload = {
-            "empNo": "EMP-999",
+            "empId": "EMP-999",
             "name": "Test User",
             "designation": "Tester",
             "department": "QA",

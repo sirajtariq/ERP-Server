@@ -13,7 +13,7 @@ import employees.services as services
 
 
 class EmployeeSerializer(serializers.ModelSerializer):
-    empNo = serializers.CharField(source="emp_no")
+    empId = serializers.CharField(source="emp_no", required=True)
     joiningDate = serializers.DateField(source="joining_date")
     leavingDate = serializers.DateField(source="leaving_date", required=False, allow_null=True)
     rejoiningDate = serializers.DateField(source="rejoining_date", required=False, allow_null=True)
@@ -27,7 +27,7 @@ class EmployeeSerializer(serializers.ModelSerializer):
         model = Employee
         fields = [
             "id",
-            "empNo",
+            "empId",
             "name",
             "designation",
             "department",
@@ -48,6 +48,10 @@ class EmployeeSerializer(serializers.ModelSerializer):
 
     def to_internal_value(self, data):
         data = data.copy() if hasattr(data, "copy") else dict(data)
+        if "empId" in data and "emp_no" not in data:
+            data["emp_no"] = data["empId"]
+        elif "emp_id" in data and "emp_no" not in data:
+            data["emp_no"] = data["emp_id"]
         for field in ["leavingDate", "leaving_date", "rejoiningDate", "rejoining_date", "joiningDate", "joining_date"]:
             if field in data and data[field] == "":
                 data[field] = None
@@ -97,7 +101,7 @@ class EmployeeListSerializer(serializers.ModelSerializer):
 
 class AttendanceSerializer(serializers.ModelSerializer):
     employeeId = serializers.IntegerField(source="employee.id", read_only=True)
-    empNo = serializers.CharField(source="employee.emp_no", read_only=True)
+    empId = serializers.CharField(source="employee.emp_no", read_only=True)
     employeeName = serializers.CharField(source="employee.name", read_only=True)
     checkIn = serializers.TimeField(source="check_in", required=False, allow_null=True)
     checkOut = serializers.TimeField(source="check_out", required=False, allow_null=True)
@@ -109,7 +113,7 @@ class AttendanceSerializer(serializers.ModelSerializer):
             "id",
             "employee",
             "employeeId",
-            "empNo",
+            "empId",
             "employeeName",
             "date",
             "status",

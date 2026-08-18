@@ -62,7 +62,6 @@ class EmployeeViewSet(viewsets.ModelViewSet):
             params.get("search", "").strip()
             or params.get("name", "").strip()
             or params.get("empId", "").strip()
-            or params.get("empNo", "").strip()
         )
         if search:
             qs = qs.filter(
@@ -85,7 +84,7 @@ class EmployeeViewSet(viewsets.ModelViewSet):
     @extend_schema(
         summary="Retrieve paginated list of employees with global summary KPI envelope.",
         parameters=[
-            openapi.Parameter("search", openapi.IN_QUERY, description="Search by name, empNo, department, or designation", type=openapi.TYPE_STRING),
+            openapi.Parameter("search", openapi.IN_QUERY, description="Search by name, empId, department, or designation", type=openapi.TYPE_STRING),
             openapi.Parameter("status", openapi.IN_QUERY, description="Filter by status ('all', 'active', 'inactive')", type=openapi.TYPE_STRING),
             openapi.Parameter("department", openapi.IN_QUERY, description="Filter by department", type=openapi.TYPE_STRING),
             openapi.Parameter("page", openapi.IN_QUERY, description="Page number", type=openapi.TYPE_INTEGER),
@@ -313,7 +312,7 @@ class AttendanceViewSet(viewsets.ModelViewSet):
                     "id": None,
                     "employee": emp.id,
                     "employeeId": emp.id,
-                    "empNo": emp.emp_no,
+                    "empId": emp.emp_no,
                     "employeeName": emp.name,
                     "date": target_date,
                     "status": "unmarked",

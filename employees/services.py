@@ -560,7 +560,7 @@ def generate_payslip_data(salary_instance: EmployeeSalary) -> dict:
         },
         "employee": {
             "id": employee.id,
-            "empNo": employee.emp_no,
+            "empId": employee.emp_no,
             "name": employee.name,
             "designation": employee.designation,
             "department": employee.department,
@@ -739,7 +739,7 @@ def generate_employee_360_timeline(employee: Employee) -> dict:
     return {
         "employee": {
             "id": employee.id,
-            "empNo": employee.emp_no,
+            "empId": employee.emp_no,
             "name": employee.name,
             "designation": employee.designation,
             "department": employee.department,
