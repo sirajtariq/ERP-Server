@@ -247,12 +247,41 @@ class EmployeeAPITestCase(TestCase):
         self.assertIsNone(res.data["leavingDate"])
         self.assertIsNone(res.data["rejoiningDate"])
 
-    def test_employee_360_detail(self):
+    def test_employee_360_overview_and_tabs(self):
         res = self.client.get(f"/api/employees/{self.emp.id}/")
         self.assertEqual(res.status_code, status.HTTP_200_OK)
-        self.assertIn("employee", res.data)
-        self.assertIn("timeline", res.data)
-        self.assertIn("advanceBalance", res.data)
+        self.assertIn("header", res.data)
+        self.assertIn("topMetrics", res.data)
+        self.assertIn("tabBadges", res.data)
+        self.assertIn("personalInfo", res.data)
+        self.assertIn("salaryInfo", res.data)
+        self.assertNotIn("timeline", res.data)
+
+        # Test Salaries Tab
+        sal_res = self.client.get(f"/api/employees/{self.emp.id}/salaries-tab/")
+        self.assertEqual(sal_res.status_code, status.HTTP_200_OK)
+        self.assertIn("summary", sal_res.data)
+        self.assertIn("results", sal_res.data)
+
+        # Test Increments Tab
+        inc_res = self.client.get(f"/api/employees/{self.emp.id}/increments-tab/")
+        self.assertEqual(inc_res.status_code, status.HTTP_200_OK)
+        self.assertIn("summary", inc_res.data)
+        self.assertIn("results", inc_res.data)
+
+        # Test Advances Tab
+        adv_res = self.client.get(f"/api/employees/{self.emp.id}/advances-tab/")
+        self.assertEqual(adv_res.status_code, status.HTTP_200_OK)
+        self.assertIn("summary", adv_res.data)
+        self.assertIn("results", adv_res.data)
+
+        # Test Attendance Tab Grid Matrix
+        att_res = self.client.get(f"/api/attendance/?employeeId={self.emp.id}&month=8&year=2026")
+        self.assertEqual(att_res.status_code, status.HTTP_200_OK)
+        self.assertIn("cards", att_res.data)
+        self.assertIn("summary", att_res.data)
+        self.assertIn("calendarGrid", att_res.data)
+        self.assertIn("logs", att_res.data)
 
     def test_soft_delete(self):
         res = self.client.delete(f"/api/employees/{self.emp.id}/")

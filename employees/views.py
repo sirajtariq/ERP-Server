@@ -116,11 +116,32 @@ class EmployeeViewSet(viewsets.ModelViewSet):
         employee = serializer.save()
         return Response(EmployeeSerializer(employee).data, status=status.HTTP_201_CREATED)
 
-    @extend_schema(summary="Retrieve 360-degree employee details with timeline and history tabs.")
+    @extend_schema(summary="Retrieve 360-degree employee overview with top metrics and tab badges.")
     def retrieve(self, request, *args, **kwargs):
         employee = self.get_object()
-        data_360 = services.generate_employee_360_timeline(employee)
+        data_360 = services.get_employee_360_overview(employee)
         return Response(data_360, status=status.HTTP_200_OK)
+
+    @extend_schema(summary="Get salaries tab data for employee.")
+    @action(detail=True, methods=["get"], url_path="salaries-tab")
+    def get_salaries(self, request, pk=None):
+        employee = self.get_object()
+        data = services.get_employee_salaries_tab_data(employee)
+        return Response(data, status=status.HTTP_200_OK)
+
+    @extend_schema(summary="Get increments tab data for employee.")
+    @action(detail=True, methods=["get"], url_path="increments-tab")
+    def get_increments(self, request, pk=None):
+        employee = self.get_object()
+        data = services.get_employee_increments_tab_data(employee)
+        return Response(data, status=status.HTTP_200_OK)
+
+    @extend_schema(summary="Get advances tab data for employee.")
+    @action(detail=True, methods=["get"], url_path="advances-tab")
+    def get_advances(self, request, pk=None):
+        employee = self.get_object()
+        data = services.get_employee_advances_tab_data(employee)
+        return Response(data, status=status.HTTP_200_OK)
 
     @extend_schema(summary="Update an employee record.")
     def update(self, request, *args, **kwargs):
@@ -263,30 +284,23 @@ class AttendanceViewSet(viewsets.ModelViewSet):
         ]
     )
     def list(self, request, *args, **kwargs):
-        emp_id = request.query_params.get("employeeId")
+        emp_id = request.query_params.get("employeeId") or request.query_params.get("employee")
         month_param = request.query_params.get("month")
         year_param = request.query_params.get("year")
 
         # Monthly Calendar Grid Mode
-        if emp_id and month_param and year_param:
+        if emp_id:
             try:
                 emp = Employee.objects.get(id=emp_id, is_deleted=False)
-                month = int(month_param)
-                year = int(year_param)
             except (Employee.DoesNotExist, ValueError):
-                return Response({"detail": "Invalid employee or date parameters."}, status=status.HTTP_400_BAD_REQUEST)
+                return Response({"detail": "Employee not found."}, status=status.HTTP_404_NOT_FOUND)
 
-            summary = services.calculate_month_attendance_summary(emp, month, year)
-            records = Attendance.objects.filter(employee=emp, date__year=year, date__month=month).order_by("date")
-            serialized_records = AttendanceSerializer(records, many=True).data
+            now = timezone.now().date()
+            month = int(month_param) if month_param else now.month
+            year = int(year_param) if year_param else now.year
 
-            return Response({
-                "employeeId": emp.id,
-                "month": month,
-                "year": year,
-                "summary": summary,
-                "records": serialized_records,
-            }, status=status.HTTP_200_OK)
+            data = services.get_employee_attendance_tab_data(emp, month, year)
+            return Response(data, status=status.HTTP_200_OK)
 
         # Daily Sheet Mode
         target_date_str = request.query_params.get("date")
