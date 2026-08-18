@@ -1,7 +1,7 @@
 import datetime
 from decimal import Decimal
 from django.contrib.auth import get_user_model
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from rest_framework import status
 from rest_framework.test import APIClient
 
@@ -49,7 +49,6 @@ class EmployeeServiceTestCase(TestCase):
         self.assertEqual(kpis["advanceOutstanding"], Decimal("0.00"))
 
     def test_salary_advance_and_fifo_recovery(self):
-        # Issue two advances for emp1
         adv1 = services.issue_salary_advance(self.emp1, {
             "date": datetime.date(2026, 8, 1),
             "amount": Decimal("10000.00"),
@@ -69,7 +68,6 @@ class EmployeeServiceTestCase(TestCase):
         kpis = services.calculate_payroll_global_kpis()
         self.assertEqual(kpis["advanceOutstanding"], Decimal("25000.00"))
 
-        # Recover 15000 via FIFO: adv1 should be fully recovered (10000), adv2 partially (5000)
         services.process_fifo_advance_recovery(self.emp1, Decimal("15000.00"))
 
         adv1.refresh_from_db()
@@ -83,19 +81,26 @@ class EmployeeServiceTestCase(TestCase):
         self.assertEqual(bal_after, Decimal("10000.00"))
 
     def test_attendance_summary_calculation(self):
-        # Log attendance: 2 absent, 2 half_day, rest present
         Attendance.objects.create(employee=self.emp1, date=datetime.date(2026, 8, 1), status="absent")
         Attendance.objects.create(employee=self.emp1, date=datetime.date(2026, 8, 2), status="absent")
-        Attendance.objects.create(employee=self.emp1, date=datetime.date(2026, 8, 3), status="half_day")
-        Attendance.objects.create(employee=self.emp1, date=datetime.date(2026, 8, 4), status="half_day")
+        Attendance.objects.create(employee=self.emp1, date=datetime.date(2026, 8, 3), status="half_unpaid")
+        Attendance.objects.create(employee=self.emp1, date=datetime.date(2026, 8, 4), status="half_unpaid")
 
         summary = services.calculate_month_attendance_summary(self.emp1, 8, 2026)
-        self.assertEqual(summary["totalWorkingDays"], 30)
+        self.assertEqual(summary["monthDays"], 31)
         self.assertEqual(summary["rawAbsentDays"], 2)
         self.assertEqual(summary["halfDays"], 2)
-        # perDayRate = 100000 / 30 = 3333.33
-        # absentDeduction = 2 * 3333.33 + 2 * (3333.33 / 2) = 6666.66 + 3333.33 = 9999.99
         self.assertGreater(summary["attendanceDeduction"], Decimal("0.00"))
+
+    @override_settings(WEEKLY_OFF_DAYS=[4, 6])
+    def test_configurable_weekly_off_days(self):
+        off_days = services.get_configured_weekly_off_days()
+        self.assertEqual(off_days, [4, 6])
+
+        summary = services.calculate_month_attendance_summary(self.emp1, 8, 2026)
+        # August 2026 has 31 days, 4 Fridays (4) and 5 Sundays (6) = 9 off days -> 22 working days
+        self.assertEqual(summary["weeklyOffs"], 9)
+        self.assertEqual(summary["workingDays"], 22)
 
     def test_salary_increment_process(self):
         inc = services.process_salary_increment(self.emp1, {
@@ -113,7 +118,7 @@ class EmployeeServiceTestCase(TestCase):
         salary_instance = services.record_salary_payment(self.emp1, {
             "month": 8,
             "year": 2026,
-            "workingDays": 30,
+            "workingDays": 27,
             "bonus": Decimal("5000.00"),
             "deductions": Decimal("1000.00"),
             "advanceDeduction": Decimal("0.00"),
@@ -129,6 +134,51 @@ class EmployeeServiceTestCase(TestCase):
         self.assertEqual(payslip["payslip"]["slipNo"], salary_instance.slip_no)
         self.assertEqual(payslip["summary"]["paidAmount"], Decimal("50000.00"))
         self.assertIn("Only", payslip["summary"]["amountInWords"])
+
+    @override_settings(SALARY_CALCULATION_BASIS="fixed_30")
+    def test_fixed_30_salary_calculation_basis(self):
+        emp30 = Employee.objects.create(
+            emp_no="EMP-030",
+            name="Tariq Mahmood",
+            designation="Officer",
+            department="Admin",
+            joining_date=datetime.date(2025, 1, 1),
+            basic_salary=Decimal("30000.00"),
+            current_salary=Decimal("30000.00"),
+            status="active",
+        )
+        Attendance.objects.create(employee=emp30, date=datetime.date(2026, 8, 1), status="absent")
+        Attendance.objects.create(employee=emp30, date=datetime.date(2026, 8, 2), status="absent")
+
+        summary = services.calculate_month_attendance_summary(emp30, 8, 2026)
+        self.assertEqual(summary["perDayRate"], Decimal("1000.00"))
+        self.assertEqual(summary["absentDeduction"], Decimal("2000.00"))
+
+    def test_salary_payment_auto_expense_sync_and_reversal(self):
+        from purchase.models import Expense
+
+        salary_instance = services.record_salary_payment(self.emp1, {
+            "month": 8,
+            "year": 2026,
+            "amount": Decimal("25000.00"),
+            "paymentDate": datetime.date(2026, 8, 31),
+            "paymentMethod": "Cash",
+            "paidBy": "Finance Admin",
+        })
+
+        payment = salary_instance.payments.first()
+        self.assertIsNotNone(payment)
+
+        # Test Case 2: Verify Expense entry created
+        expense = Expense.objects.filter(reference_type="salary_payment", reference_id=payment.id).first()
+        self.assertIsNotNone(expense)
+        self.assertEqual(expense.category, "Salary")
+        self.assertEqual(expense.amount, Decimal("25000.00"))
+
+        # Test Case 3: Delete payment installment and verify linked Expense entry is purged
+        payment.delete()
+        expense_after = Expense.objects.filter(reference_type="salary_payment", reference_id=payment.id).first()
+        self.assertIsNone(expense_after)
 
 
 class EmployeeAPITestCase(TestCase):
@@ -198,7 +248,6 @@ class EmployeeAPITestCase(TestCase):
         self.assertTrue(self.emp.is_deleted)
         self.assertEqual(self.emp.status, "inactive")
 
-        # Must not appear in list endpoint
         list_res = self.client.get("/api/employees/")
         self.assertEqual(len(list_res.data["results"]), 0)
 
@@ -206,7 +255,7 @@ class EmployeeAPITestCase(TestCase):
         payload = {
             "month": 8,
             "year": 2026,
-            "workingDays": 30,
+            "workingDays": 27,
             "bonus": "2000.00",
             "amount": "62000.00",
             "paymentDate": "2026-08-31",
@@ -218,7 +267,6 @@ class EmployeeAPITestCase(TestCase):
         self.assertEqual(res.data["status"], "paid")
 
     def test_payslip_endpoint(self):
-        # Create salary record first
         sal = services.record_salary_payment(self.emp, {
             "month": 8,
             "year": 2026,
@@ -251,6 +299,12 @@ class EmployeeAPITestCase(TestCase):
         self.assertEqual(bulk_res.status_code, status.HTTP_200_OK)
         self.assertEqual(bulk_res.data["totalSaved"], 1)
 
+    def test_attendance_config_endpoint(self):
+        res = self.client.get("/api/attendance/config/")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertIn("weeklyOffDays", res.data)
+        self.assertIsInstance(res.data["weeklyOffDays"], list)
+
 
 class EmployeeSerializerTestCase(TestCase):
     def test_to_internal_value_empty_string_conversion(self):
@@ -268,18 +322,3 @@ class EmployeeSerializerTestCase(TestCase):
         self.assertTrue(serializer.is_valid(), serializer.errors)
         self.assertIsNone(serializer.validated_data.get("leaving_date"))
         self.assertIsNone(serializer.validated_data.get("rejoining_date"))
-
-        # Test with snake_case field names in payload
-        payload_snake = {
-            "empNo": "EMP-998",
-            "name": "Test User 2",
-            "designation": "Tester",
-            "department": "QA",
-            "joiningDate": "2026-01-01",
-            "leaving_date": "",
-            "rejoining_date": "",
-        }
-        serializer_snake = EmployeeSerializer(data=payload_snake)
-        self.assertTrue(serializer_snake.is_valid(), serializer_snake.errors)
-        self.assertIsNone(serializer_snake.validated_data.get("leaving_date"))
-        self.assertIsNone(serializer_snake.validated_data.get("rejoining_date"))

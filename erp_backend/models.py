@@ -37,7 +37,18 @@ class BusinessSettings(models.Model):
     contact = models.CharField(max_length=50, blank=True)
     whatsapp = models.CharField(max_length=50, blank=True)
     email = models.EmailField(blank=True)
-    address = models.TextField(blank=True)
+    address = models.TextField(blank=True, default='')
+    SALARY_CALCULATION_CHOICES = [
+        ('working_days', 'Working Days (Excluding Off Days)'),
+        ('fixed_30', 'Fixed 30 Days'),
+        ('month_days', 'Total Calendar Days in Month'),
+    ]
+    salary_calculation_basis = models.CharField(
+        max_length=30,
+        choices=SALARY_CALCULATION_CHOICES,
+        default='working_days',
+    )
+    weekly_off_days = models.JSONField(default=list, blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

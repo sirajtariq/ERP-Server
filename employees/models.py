@@ -1,5 +1,6 @@
 from decimal import Decimal
 from django.db import models
+from django.utils import timezone
 
 
 class Employee(models.Model):
@@ -37,17 +38,19 @@ class Attendance(models.Model):
     STATUS_CHOICES = [
         ("present", "Present"),
         ("absent", "Absent"),
-        ("half_day", "Half Day"),
-        ("paid_leave", "Paid Leave"),
-        ("unpaid_leave", "Unpaid Leave"),
+        ("half_paid", "Half Day (Paid)"),
+        ("half_unpaid", "Half Day (Unpaid)"),
+        ("leave_paid", "Leave (Paid)"),
+        ("leave_unpaid", "Leave (Unpaid)"),
     ]
 
     employee = models.ForeignKey(Employee, related_name="attendances", on_delete=models.CASCADE)
     date = models.DateField(db_index=True)
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, db_index=True)
     check_in = models.TimeField(null=True, blank=True)
     check_out = models.TimeField(null=True, blank=True)
     remarks = models.CharField(max_length=255, blank=True, null=True)
+    created_at = models.DateTimeField(default=timezone.now)
 
     class Meta:
         ordering = ["-date", "-id"]
@@ -111,13 +114,18 @@ class EmployeeSalary(models.Model):
     month = models.PositiveSmallIntegerField()
     year = models.PositiveSmallIntegerField()
     basic_salary = models.DecimalField(max_digits=12, decimal_places=2)
+    current_salary = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
     working_days = models.PositiveSmallIntegerField(default=30)
+    month_days = models.PositiveSmallIntegerField(default=30)
     absent_days = models.DecimalField(max_digits=4, decimal_places=1, default=Decimal("0.0"))
+    half_unpaid_days = models.DecimalField(max_digits=4, decimal_places=1, default=Decimal("0.0"))
+    leave_unpaid_days = models.DecimalField(max_digits=4, decimal_places=1, default=Decimal("0.0"))
     attendance_deduction = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
     bonus = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
     deductions = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
     advance_deduction = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
     net_salary = models.DecimalField(max_digits=12, decimal_places=2)
+    amount_paid = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending", db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -145,3 +153,12 @@ class SalaryPayment(models.Model):
 
     def __str__(self):
         return f"Payment {self.amount} for {self.salary.slip_no}"
+
+    def delete(self, *args, **kwargs):
+        payment_id = self.id
+        super().delete(*args, **kwargs)
+        try:
+            from purchase.services import reverse_auto_expense
+            reverse_auto_expense("salary_payment", payment_id)
+        except Exception:
+            pass

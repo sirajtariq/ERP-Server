@@ -30,7 +30,7 @@ class UserReadSerializer(serializers.ModelSerializer):
 
 class UserSerializer(serializers.ModelSerializer):
     role = serializers.ChoiceField(
-        choices=["ADMIN", "SALES_USER", "PURCHASE_USER"], 
+        choices=["ADMIN", "Admin", "SALES_USER", "Sales", "PURCHASE_USER", "Purchase"], 
         write_only=True,
         required=True,
         help_text="Role to assign to the user (maps to Django Group)."
@@ -66,10 +66,13 @@ class UserSerializer(serializers.ModelSerializer):
         role_enum = validated_data.pop('role')
         role_mapping = {
             "ADMIN": "Admin",
+            "Admin": "Admin",
             "SALES_USER": "Sales",
-            "PURCHASE_USER": "Purchase"
+            "Sales": "Sales",
+            "PURCHASE_USER": "Purchase",
+            "Purchase": "Purchase",
         }
-        role_name = role_mapping.get(role_enum)
+        role_name = role_mapping.get(role_enum, role_enum)
         
         # Pop profile fields
         profile_data = {
@@ -243,11 +246,15 @@ class UserMeSerializer(serializers.ModelSerializer):
 from .models import BusinessSettings, BackupSetting
 
 class BusinessSettingsSerializer(serializers.ModelSerializer):
+    salaryCalculationBasis = serializers.CharField(source='salary_calculation_basis', required=False)
+    weeklyOffDays = serializers.JSONField(source='weekly_off_days', required=False)
+
     class Meta:
         model = BusinessSettings
         fields = [
             'logo', 'business_name', 'contact', 'whatsapp', 
-            'email', 'address', 'created_at', 'updated_at'
+            'email', 'address', 'salary_calculation_basis', 'salaryCalculationBasis',
+            'weekly_off_days', 'weeklyOffDays', 'created_at', 'updated_at'
         ]
         read_only_fields = ['created_at', 'updated_at']
 

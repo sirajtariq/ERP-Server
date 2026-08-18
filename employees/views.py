@@ -1,3 +1,4 @@
+import calendar
 import datetime
 from django.db import transaction
 from django.db.models import Q
@@ -86,7 +87,6 @@ class EmployeeViewSet(viewsets.ModelViewSet):
         if page is not None:
             serializer = EmployeeListSerializer(page, many=True)
             paginated_response = self.get_paginated_response(serializer.data)
-            # Add summary envelope to paginated response
             summary_kpis = services.calculate_payroll_global_kpis()
             paginated_response.data["summary"] = summary_kpis
             return paginated_response
@@ -236,19 +236,48 @@ class EmployeeViewSet(viewsets.ModelViewSet):
 
 class AttendanceViewSet(viewsets.ModelViewSet):
     """
-    ViewSet for managing employee daily attendance and bulk attendance logging.
+    ViewSet for managing employee daily attendance, monthly calendar grid, and bulk attendance logging.
     """
     queryset = Attendance.objects.filter(employee__is_deleted=False).order_by("-date", "-id")
     serializer_class = AttendanceSerializer
     permission_classes = [permissions.IsAuthenticated]
 
     @extend_schema(
-        summary="Retrieve daily attendance sheet for all active employees for a given date.",
+        summary="Retrieve daily attendance sheet OR monthly attendance calendar grid for an employee.",
         parameters=[
-            openapi.Parameter("date", openapi.IN_QUERY, description="Date in YYYY-MM-DD format (defaults to today)", type=openapi.TYPE_STRING, format="date")
+            openapi.Parameter("date", openapi.IN_QUERY, description="Daily sheet date YYYY-MM-DD", type=openapi.TYPE_STRING, format="date"),
+            openapi.Parameter("employeeId", openapi.IN_QUERY, description="Employee ID for monthly grid", type=openapi.TYPE_INTEGER),
+            openapi.Parameter("month", openapi.IN_QUERY, description="Month 1-12 for monthly grid", type=openapi.TYPE_INTEGER),
+            openapi.Parameter("year", openapi.IN_QUERY, description="Year e.g. 2026 for monthly grid", type=openapi.TYPE_INTEGER),
         ]
     )
     def list(self, request, *args, **kwargs):
+        emp_id = request.query_params.get("employeeId")
+        month_param = request.query_params.get("month")
+        year_param = request.query_params.get("year")
+
+        # Monthly Calendar Grid Mode
+        if emp_id and month_param and year_param:
+            try:
+                emp = Employee.objects.get(id=emp_id, is_deleted=False)
+                month = int(month_param)
+                year = int(year_param)
+            except (Employee.DoesNotExist, ValueError):
+                return Response({"detail": "Invalid employee or date parameters."}, status=status.HTTP_400_BAD_REQUEST)
+
+            summary = services.calculate_month_attendance_summary(emp, month, year)
+            records = Attendance.objects.filter(employee=emp, date__year=year, date__month=month).order_by("date")
+            serialized_records = AttendanceSerializer(records, many=True).data
+
+            return Response({
+                "employeeId": emp.id,
+                "month": month,
+                "year": year,
+                "summary": summary,
+                "records": serialized_records,
+            }, status=status.HTTP_200_OK)
+
+        # Daily Sheet Mode
         target_date_str = request.query_params.get("date")
         if target_date_str:
             try:
@@ -287,6 +316,14 @@ class AttendanceViewSet(viewsets.ModelViewSet):
             "records": sheet,
         }, status=status.HTTP_200_OK)
 
+    @extend_schema(summary="Get configured weekly off days and salary calculation basis for frontend.")
+    @action(detail=False, methods=["get"], url_path="config")
+    def get_config(self, request):
+        return Response({
+            "weeklyOffDays": services.get_configured_weekly_off_days(),
+            "salaryCalculationBasis": services.get_configured_salary_calculation_basis(),
+        }, status=status.HTTP_200_OK)
+
     @extend_schema(
         summary="Bulk save attendance for all or selected employees on a given date.",
         request=BulkAttendanceSerializer
@@ -299,29 +336,11 @@ class AttendanceViewSet(viewsets.ModelViewSet):
         target_date = serializer.validated_data["date"]
         records_data = serializer.validated_data["records"]
 
-        saved_records = []
-        with transaction.atomic():
-            for rec in records_data:
-                emp_id = rec["employeeId"]
-                try:
-                    emp = Employee.objects.get(id=emp_id, is_deleted=False)
-                except Employee.DoesNotExist:
-                    continue
-
-                att_obj, _ = Attendance.objects.update_or_create(
-                    employee=emp,
-                    date=target_date,
-                    defaults={
-                        "status": rec["status"],
-                        "check_in": rec.get("checkIn"),
-                        "check_out": rec.get("checkOut"),
-                        "remarks": rec.get("remarks"),
-                    }
-                )
-                saved_records.append(AttendanceSerializer(att_obj).data)
+        saved_objects = services.bulk_record_attendance(target_date, records_data)
+        serialized_records = AttendanceSerializer(saved_objects, many=True).data
 
         return Response({
             "date": target_date,
-            "totalSaved": len(saved_records),
-            "records": saved_records,
+            "totalSaved": len(serialized_records),
+            "records": serialized_records,
         }, status=status.HTTP_200_OK)
