@@ -277,10 +277,14 @@ class EmployeeAPITestCase(TestCase):
         self.assertNotIn("attendanceDeduction", first_item)
 
         # Test Increments Tab
-        inc_res = self.client.get(f"/api/employees/{self.emp.id}/increments-tab/")
+        inc_res = self.client.get(f"/api/employees/{self.emp.id}/increments-tab/?page=1&pageSize=10")
         self.assertEqual(inc_res.status_code, status.HTTP_200_OK)
         self.assertIn("summary", inc_res.data)
         self.assertIn("results", inc_res.data)
+        self.assertIn("basicSalary", inc_res.data["summary"])
+        self.assertIn("currentSalary", inc_res.data["summary"])
+        self.assertIn("totalIncremented", inc_res.data["summary"])
+        self.assertIn("noOfIncrements", inc_res.data["summary"])
 
         # Test Advances Tab
         adv_res = self.client.get(f"/api/employees/{self.emp.id}/advances-tab/")

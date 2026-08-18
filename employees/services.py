@@ -818,6 +818,23 @@ def get_employee_salaries_tab_data(employee: Employee) -> dict:
     }
 
 
+def get_employee_increments_tab_summary(employee: Employee) -> dict:
+    """
+    Returns summary statistics for the employee salary increments tab.
+    """
+    increments = EmployeeIncrement.objects.filter(employee=employee)
+    total_incremented = Decimal("0.00")
+    for inc in increments:
+        total_incremented += inc.increment_amount
+
+    return {
+        "basicSalary": _quantize_decimal(employee.basic_salary),
+        "currentSalary": _quantize_decimal(employee.current_salary),
+        "totalIncremented": _quantize_decimal(total_incremented),
+        "noOfIncrements": increments.count(),
+    }
+
+
 def get_employee_increments_tab_data(employee: Employee) -> dict:
     """
     Returns increments tab data including top summary and list of serialized increment records.
