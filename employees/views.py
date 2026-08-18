@@ -34,7 +34,14 @@ from employees.schema import extend_schema
 class EmployeePagination(PageNumberPagination):
     page_size = 25
     page_size_query_param = "page_size"
+    page_query_param = "page"
     max_page_size = 100
+
+    def get_page_number(self, request, paginator):
+        page_number = request.query_params.get(self.page_query_param) or request.query_params.get("page_number")
+        if page_number:
+            return page_number
+        return super().get_page_number(request, paginator)
 
 
 class EmployeeViewSet(viewsets.ModelViewSet):
@@ -51,7 +58,12 @@ class EmployeeViewSet(viewsets.ModelViewSet):
         qs = Employee.objects.filter(is_deleted=False).order_by("-id")
         params = self.request.query_params
 
-        search = params.get("search", "").strip()
+        search = (
+            params.get("search", "").strip()
+            or params.get("name", "").strip()
+            or params.get("empId", "").strip()
+            or params.get("empNo", "").strip()
+        )
         if search:
             qs = qs.filter(
                 Q(name__icontains=search) |

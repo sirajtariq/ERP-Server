@@ -61,14 +61,38 @@ class EmployeeSerializer(serializers.ModelSerializer):
         return super().create(validated_data)
 
 
-class EmployeeListSerializer(EmployeeSerializer):
-    advanceBalance = serializers.SerializerMethodField()
+class EmployeeListSerializer(serializers.ModelSerializer):
+    empId = serializers.CharField(source="emp_no", read_only=True)
+    joiningDate = serializers.DateField(source="joining_date", read_only=True)
+    lastWorkingDate = serializers.DateField(source="leaving_date", read_only=True)
+    rejoiningDate = serializers.DateField(source="rejoining_date", read_only=True)
+    advance = serializers.SerializerMethodField()
+    salary = serializers.SerializerMethodField()
 
-    class Meta(EmployeeSerializer.Meta):
-        fields = EmployeeSerializer.Meta.fields + ["advanceBalance"]
+    class Meta:
+        model = Employee
+        fields = [
+            "id",
+            "empId",
+            "name",
+            "designation",
+            "department",
+            "joiningDate",
+            "salary",
+            "advance",
+            "status",
+            "lastWorkingDate",
+            "rejoiningDate",
+        ]
 
-    def get_advanceBalance(self, obj):
+    def get_advance(self, obj):
         return services.calculate_employee_advance_balance(obj)
+
+    def get_salary(self, obj):
+        return {
+            "basicSalary": services._quantize_decimal(obj.basic_salary),
+            "currentSalary": services._quantize_decimal(obj.current_salary),
+        }
 
 
 class AttendanceSerializer(serializers.ModelSerializer):
