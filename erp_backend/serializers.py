@@ -243,11 +243,13 @@ class UserMeSerializer(serializers.ModelSerializer):
         return CustomTokenObtainPairSerializer._resolve_role(obj)
 
 
+import base64
 from .models import BusinessSettings, BackupSetting
 
 class BusinessSettingsSerializer(serializers.ModelSerializer):
     salaryCalculationBasis = serializers.CharField(source='salary_calculation_basis', required=False)
     weeklyOffDays = serializers.JSONField(source='weekly_off_days', required=False)
+    logo = serializers.CharField(required=False, allow_null=True, allow_blank=True)
 
     class Meta:
         model = BusinessSettings
@@ -257,6 +259,19 @@ class BusinessSettingsSerializer(serializers.ModelSerializer):
             'weekly_off_days', 'weeklyOffDays', 'created_at', 'updated_at'
         ]
         read_only_fields = ['created_at', 'updated_at']
+
+    def to_internal_value(self, data):
+        data = data.copy() if hasattr(data, 'copy') else dict(data)
+        logo_val = data.get('logo')
+        if logo_val and not isinstance(logo_val, str):
+            try:
+                content_type = getattr(logo_val, 'content_type', 'image/png')
+                file_bytes = logo_val.read()
+                b64_str = base64.b64encode(file_bytes).decode('utf-8')
+                data['logo'] = f"data:{content_type};base64,{b64_str}"
+            except Exception:
+                pass
+        return super().to_internal_value(data)
 
 class BackupSettingSerializer(serializers.ModelSerializer):
     class Meta:

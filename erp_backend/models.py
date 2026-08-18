@@ -32,7 +32,7 @@ class BusinessSettings(models.Model):
     """
     Singleton model to hold business identity settings.
     """
-    logo = models.ImageField(upload_to='business_logo/', blank=True, null=True)
+    logo = models.TextField(blank=True, null=True)
     business_name = models.CharField(max_length=255)
     contact = models.CharField(max_length=50, blank=True)
     whatsapp = models.CharField(max_length=50, blank=True)
