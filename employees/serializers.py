@@ -1,3 +1,4 @@
+import calendar
 from decimal import Decimal
 from rest_framework import serializers
 
@@ -271,6 +272,36 @@ class EmployeeSalarySerializer(serializers.ModelSerializer):
             "balanceRemaining",
             "createdAt",
         ]
+
+    def get_balanceRemaining(self, obj):
+        return services.get_salary_balance_remaining(obj)
+
+
+class EmployeeSalaryTabSerializer(serializers.ModelSerializer):
+    monthLabel = serializers.SerializerMethodField()
+    netSalary = serializers.DecimalField(source="net_salary", max_digits=12, decimal_places=2)
+    bonus = serializers.DecimalField(max_digits=12, decimal_places=2)
+    amountPaid = serializers.DecimalField(source="amount_paid", max_digits=12, decimal_places=2)
+    balanceRemaining = serializers.SerializerMethodField()
+    payments = SalaryPaymentSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = EmployeeSalary
+        fields = [
+            "id",
+            "month",
+            "year",
+            "monthLabel",
+            "netSalary",
+            "bonus",
+            "amountPaid",
+            "balanceRemaining",
+            "status",
+            "payments",
+        ]
+
+    def get_monthLabel(self, obj):
+        return f"{calendar.month_name[obj.month]} {obj.year}"
 
     def get_balanceRemaining(self, obj):
         return services.get_salary_balance_remaining(obj)

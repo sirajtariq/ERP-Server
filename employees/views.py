@@ -26,6 +26,7 @@ from employees.serializers import (
     SalaryAdvanceSerializer,
     SalaryPaymentSerializer,
     EmployeeSalarySerializer,
+    EmployeeSalaryTabSerializer,
 )
 import employees.services as services
 from employees.schema import extend_schema
@@ -42,6 +43,16 @@ class EmployeePagination(PageNumberPagination):
         if page_number:
             return page_number
         return super().get_page_number(request, paginator)
+
+    def get_page_size(self, request):
+        if "pageSize" in request.query_params:
+            try:
+                ps = int(request.query_params["pageSize"])
+                if ps > 0:
+                    return min(ps, self.max_page_size)
+            except (ValueError, TypeError):
+                pass
+        return super().get_page_size(request)
 
 
 class EmployeeViewSet(viewsets.ModelViewSet):
@@ -122,12 +133,26 @@ class EmployeeViewSet(viewsets.ModelViewSet):
         data_360 = services.get_employee_360_overview(employee)
         return Response(data_360, status=status.HTTP_200_OK)
 
-    @extend_schema(summary="Get salaries tab data for employee.")
+    @extend_schema(summary="Get paginated salary history tab data for employee.")
     @action(detail=True, methods=["get"], url_path="salaries-tab")
     def get_salaries(self, request, pk=None):
         employee = self.get_object()
-        data = services.get_employee_salaries_tab_data(employee)
-        return Response(data, status=status.HTTP_200_OK)
+        queryset = EmployeeSalary.objects.filter(employee=employee).prefetch_related("payments").order_by("-year", "-month")
+        
+        summary_data = services.get_employee_salaries_tab_summary(employee)
+        
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = EmployeeSalaryTabSerializer(page, many=True)
+            response = self.get_paginated_response(serializer.data)
+            response.data["summary"] = summary_data
+            return response
+
+        serializer = EmployeeSalaryTabSerializer(queryset, many=True)
+        return Response({
+            "summary": summary_data,
+            "results": serializer.data,
+        }, status=status.HTTP_200_OK)
 
     @extend_schema(summary="Get increments tab data for employee.")
     @action(detail=True, methods=["get"], url_path="increments-tab")

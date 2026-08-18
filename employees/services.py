@@ -715,6 +715,37 @@ def get_employee_360_overview(employee: Employee) -> dict:
     }
 
 
+def get_employee_salaries_tab_summary(employee: Employee) -> dict:
+    """
+    Returns summary metrics for an employee's salary history tab.
+    """
+    salaries = EmployeeSalary.objects.filter(employee=employee)
+    
+    total_paid = Decimal("0.00")
+    total_bonus = Decimal("0.00")
+    pending_salary = Decimal("0.00")
+    partial_pending_count = 0
+
+    for s in salaries:
+        paid_amt = _quantize_decimal(s.amount_paid)
+        bonus_amt = _quantize_decimal(s.bonus)
+        balance = get_salary_balance_remaining(s)
+
+        total_paid += paid_amt
+        total_bonus += bonus_amt
+
+        if s.status in ["pending", "partial"]:
+            pending_salary += balance
+            partial_pending_count += 1
+
+    return {
+        "totalPaid": _quantize_decimal(total_paid),
+        "totalBonus": _quantize_decimal(total_bonus),
+        "pendingSalary": _quantize_decimal(pending_salary),
+        "partialPendingCount": partial_pending_count,
+    }
+
+
 def get_employee_salaries_tab_data(employee: Employee) -> dict:
     """
     Returns salaries tab data including top summary cards and detailed month records with payments.

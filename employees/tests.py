@@ -258,10 +258,23 @@ class EmployeeAPITestCase(TestCase):
         self.assertNotIn("timeline", res.data)
 
         # Test Salaries Tab
-        sal_res = self.client.get(f"/api/employees/{self.emp.id}/salaries-tab/")
+        sal_rec = services.record_salary_payment(self.emp, {
+            "month": 8,
+            "year": 2026,
+            "amount": "30000.00",
+        })
+        sal_res = self.client.get(f"/api/employees/{self.emp.id}/salaries-tab/?page=1&pageSize=10")
         self.assertEqual(sal_res.status_code, status.HTTP_200_OK)
         self.assertIn("summary", sal_res.data)
         self.assertIn("results", sal_res.data)
+        self.assertIn("totalPaid", sal_res.data["summary"])
+        self.assertIn("pendingSalary", sal_res.data["summary"])
+        first_item = sal_res.data["results"][0]
+        self.assertIn("monthLabel", first_item)
+        self.assertIn("balanceRemaining", first_item)
+        self.assertIn("payments", first_item)
+        self.assertNotIn("workingDays", first_item)
+        self.assertNotIn("attendanceDeduction", first_item)
 
         # Test Increments Tab
         inc_res = self.client.get(f"/api/employees/{self.emp.id}/increments-tab/")
