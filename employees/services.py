@@ -868,6 +868,28 @@ def get_employee_increments_tab_data(employee: Employee) -> dict:
     }
 
 
+def get_employee_advances_tab_summary(employee: Employee) -> dict:
+    """
+    Returns summary statistics for the employee salary advances tab.
+    """
+    advances = SalaryAdvance.objects.filter(employee=employee)
+
+    total_given = Decimal("0.00")
+    total_recovered = Decimal("0.00")
+
+    for adv in advances:
+        total_given += adv.amount
+        total_recovered += adv.recovered_amount
+
+    outstanding_balance = calculate_employee_advance_balance(employee)
+
+    return {
+        "outstandingBalance": outstanding_balance,
+        "totalGiven": _quantize_decimal(total_given),
+        "totalRecovered": _quantize_decimal(total_recovered),
+    }
+
+
 def get_employee_advances_tab_data(employee: Employee) -> dict:
     """
     Returns advances tab data including outstanding balance, total given, total recovered, and advances list.

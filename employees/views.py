@@ -178,12 +178,29 @@ class EmployeeViewSet(viewsets.ModelViewSet):
             "summary": summary_data,
         }, status=status.HTTP_200_OK)
 
-    @extend_schema(summary="Get advances tab data for employee.")
+    @extend_schema(summary="Get paginated salary advances tab data for employee.")
     @action(detail=True, methods=["get"], url_path="advances-tab")
     def get_advances(self, request, pk=None):
         employee = self.get_object()
-        data = services.get_employee_advances_tab_data(employee)
-        return Response(data, status=status.HTTP_200_OK)
+        queryset = SalaryAdvance.objects.filter(employee=employee).order_by("-date", "-id")
+
+        summary_data = services.get_employee_advances_tab_summary(employee)
+
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = SalaryAdvanceSerializer(page, many=True)
+            response = self.get_paginated_response(serializer.data)
+            response.data["summary"] = summary_data
+            return response
+
+        serializer = SalaryAdvanceSerializer(queryset, many=True)
+        return Response({
+            "count": queryset.count(),
+            "next": None,
+            "previous": None,
+            "results": serializer.data,
+            "summary": summary_data,
+        }, status=status.HTTP_200_OK)
 
     @extend_schema(summary="Update an employee record.")
     def update(self, request, *args, **kwargs):

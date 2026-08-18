@@ -287,10 +287,13 @@ class EmployeeAPITestCase(TestCase):
         self.assertIn("noOfIncrements", inc_res.data["summary"])
 
         # Test Advances Tab
-        adv_res = self.client.get(f"/api/employees/{self.emp.id}/advances-tab/")
+        adv_res = self.client.get(f"/api/employees/{self.emp.id}/advances-tab/?page=1&pageSize=10")
         self.assertEqual(adv_res.status_code, status.HTTP_200_OK)
         self.assertIn("summary", adv_res.data)
         self.assertIn("results", adv_res.data)
+        self.assertIn("outstandingBalance", adv_res.data["summary"])
+        self.assertIn("totalGiven", adv_res.data["summary"])
+        self.assertIn("totalRecovered", adv_res.data["summary"])
 
         # Test Attendance Tab Grid Matrix
         att_res = self.client.get(f"/api/attendance/?employeeId={self.emp.id}&month=8&year=2026")
