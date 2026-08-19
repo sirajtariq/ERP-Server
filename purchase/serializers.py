@@ -160,17 +160,17 @@ class PurchaseItemSerializer(serializers.ModelSerializer):
 
 class PurchaseItemNestedSerializer(serializers.ModelSerializer):
     """Nested line item serializer (invoice is set by the parent invoice)."""
-    itemId = serializers.IntegerField(source='product_id', required=False, allow_null=True)
-    itemCode = serializers.CharField(source='item_code', required=False, allow_null=True, allow_blank=True)
-    itemName = serializers.CharField(source='product_name', required=False, allow_blank=True)
+    item_id = serializers.IntegerField(source='product_id', required=False, allow_null=True)
+    item_code = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    item_name = serializers.CharField(source='product_name', required=False, allow_blank=True)
     quantity = serializers.DecimalField(max_digits=10, decimal_places=2, required=True)
-    unitPrice = serializers.DecimalField(source='purchase_price', max_digits=12, decimal_places=2, required=True)
+    unit_price = serializers.DecimalField(source='purchase_price', max_digits=12, decimal_places=2, required=True)
     discount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, default=Decimal('0.00'))
     total = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
 
     class Meta:
         model = PurchaseItem
-        fields = ["id", "itemId", "itemCode", "itemName", "units", "quantity", "unitPrice", "discount", "total"]
+        fields = ["id", "item_id", "item_code", "item_name", "units", "quantity", "unit_price", "discount", "total"]
         read_only_fields = ["id", "total"]
 
 
