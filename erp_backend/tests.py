@@ -123,9 +123,7 @@ class BusinessSettingsTests(TestCase):
         self.assertEqual(BusinessSettings.objects.count(), 1)
         self.assertEqual(response.data['business_name'], "Updated Business")
         self.assertEqual(response.data['contact'], "12345")
-        self.assertTrue(response.data['logo'].startswith('http'))
-        self.assertIn('logo', response.data['logo'])
-        self.assertIn('.gif', response.data['logo'])
+        self.assertTrue(response.data['logo'].startswith('data:image/gif;base64,'))
 
     def test_patch_by_non_admin_rejected_403(self):
         self.client.force_authenticate(user=self.sales_user)

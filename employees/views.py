@@ -4,6 +4,7 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 from drf_yasg import openapi
+from drf_yasg.utils import swagger_auto_schema
 from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
 from rest_framework.pagination import PageNumberPagination
@@ -358,7 +359,7 @@ class AttendanceViewSet(viewsets.ModelViewSet):
             month = int(month_param) if month_param else now.month
             year = int(year_param) if year_param else now.year
 
-            data = services.get_employee_attendance_tab_data(emp, month, year)
+            data = services.get_employee_monthly_attendance_tab(emp, month, year)
             return Response(data, status=status.HTTP_200_OK)
 
         # Daily Sheet Mode
@@ -389,8 +390,6 @@ class AttendanceViewSet(viewsets.ModelViewSet):
                     "employeeName": emp.name,
                     "date": target_date,
                     "status": "unmarked",
-                    "checkIn": None,
-                    "checkOut": None,
                     "remarks": None,
                 })
 
@@ -408,23 +407,43 @@ class AttendanceViewSet(viewsets.ModelViewSet):
             "salaryCalculationBasis": services.get_configured_salary_calculation_basis(),
         }, status=status.HTTP_200_OK)
 
-    @extend_schema(
-        summary="Bulk save attendance for all or selected employees on a given date.",
-        request=BulkAttendanceSerializer
+    @swagger_auto_schema(
+        method='get',
+        operation_summary="Get bulk attendance sheet for active employees",
+        manual_parameters=[
+            openapi.Parameter(
+                'date',
+                openapi.IN_QUERY,
+                description="Target date in YYYY-MM-DD format (default: today)",
+                type=openapi.TYPE_STRING,
+                format=openapi.FORMAT_DATE,
+                required=False
+            )
+        ]
     )
-    @action(detail=False, methods=["post"], url_path="bulk")
-    def bulk_save(self, request):
-        serializer = BulkAttendanceSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
+    @swagger_auto_schema(
+        method='post',
+        operation_summary="Save bulk attendance records for a specific date",
+        request_body=BulkAttendanceSerializer
+    )
+    @action(detail=False, methods=["get", "post"], url_path="bulk")
+    def bulk(self, request):
+        if request.method == "GET":
+            target_date_str = request.query_params.get("date")
+            if not target_date_str:
+                return Response({"detail": "date parameter is required"}, status=status.HTTP_400_BAD_REQUEST)
+            try:
+                target_date = datetime.datetime.strptime(target_date_str, "%Y-%m-%d").date()
+            except ValueError:
+                return Response({"detail": "Invalid date format. Use YYYY-MM-DD."}, status=status.HTTP_400_BAD_REQUEST)
+            data = services.get_bulk_attendance_data(target_date)
+            return Response(data, status=status.HTTP_200_OK)
+        else:
+            serializer = BulkAttendanceSerializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
 
-        target_date = serializer.validated_data["date"]
-        records_data = serializer.validated_data["records"]
+            target_date = serializer.validated_data["date"]
+            records_data = serializer.validated_data["records"]
 
-        saved_objects = services.bulk_record_attendance(target_date, records_data)
-        serialized_records = AttendanceSerializer(saved_objects, many=True).data
-
-        return Response({
-            "date": target_date,
-            "totalSaved": len(serialized_records),
-            "records": serialized_records,
-        }, status=status.HTTP_200_OK)
+            result = services.save_bulk_attendance_records(target_date, records_data)
+            return Response(result, status=status.HTTP_200_OK)

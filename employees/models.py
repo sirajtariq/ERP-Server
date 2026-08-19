@@ -42,21 +42,18 @@ class Attendance(models.Model):
         ("half_unpaid", "Half Day (Unpaid)"),
         ("leave_paid", "Leave (Paid)"),
         ("leave_unpaid", "Leave (Unpaid)"),
+        ("weekly_off", "Weekly Off"),
     ]
 
     employee = models.ForeignKey(Employee, related_name="attendances", on_delete=models.CASCADE)
     date = models.DateField(db_index=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, db_index=True)
-    check_in = models.TimeField(null=True, blank=True)
-    check_out = models.TimeField(null=True, blank=True)
-    remarks = models.CharField(max_length=255, blank=True, null=True)
+    remarks = models.TextField(blank=True, default='')
     created_at = models.DateTimeField(default=timezone.now)
 
     class Meta:
-        ordering = ["-date", "-id"]
-        constraints = [
-            models.UniqueConstraint(fields=["employee", "date"], name="unique_employee_date")
-        ]
+        ordering = ["-date"]
+        unique_together = ("employee", "date")
 
     def __str__(self):
         return f"{self.employee.emp_no} - {self.date} - {self.status}"
