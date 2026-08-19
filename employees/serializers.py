@@ -104,8 +104,6 @@ class AttendanceSerializer(serializers.ModelSerializer):
     employeeId = serializers.IntegerField(source="employee.id", read_only=True)
     empId = serializers.CharField(source="employee.emp_no", read_only=True)
     employeeName = serializers.CharField(source="employee.name", read_only=True)
-    checkIn = serializers.TimeField(source="check_in", required=False, allow_null=True)
-    checkOut = serializers.TimeField(source="check_out", required=False, allow_null=True)
     createdAt = serializers.DateTimeField(source="created_at", read_only=True)
 
     class Meta:
@@ -118,22 +116,56 @@ class AttendanceSerializer(serializers.ModelSerializer):
             "employeeName",
             "date",
             "status",
-            "checkIn",
-            "checkOut",
             "remarks",
             "createdAt",
         ]
 
 
 class BulkAttendanceItemSerializer(serializers.Serializer):
-    employeeId = serializers.IntegerField()
-    status = serializers.ChoiceField(choices=[
-        "present", "absent", "half_paid", "half_unpaid", "leave_paid", "leave_unpaid",
-        "half_day", "paid_leave", "unpaid_leave" # backward compat
-    ])
-    checkIn = serializers.TimeField(required=False, allow_null=True)
-    checkOut = serializers.TimeField(required=False, allow_null=True)
-    remarks = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    employeeId = serializers.IntegerField(required=True)
+    status = serializers.ChoiceField(
+        choices=['present', 'absent', 'half_day', 'leave', 'weekly_off'],
+        required=True
+    )
+    subType = serializers.ChoiceField(
+        choices=['paid', 'unpaid'],
+        allow_null=True,
+        allow_blank=True,
+        required=False,
+        default=None
+    )
+    remarks = serializers.CharField(
+        allow_blank=True,
+        allow_null=True,
+        required=False,
+        default=''
+    )
+
+    def validate(self, attrs):
+        status_val = attrs.get('status')
+        sub_type_val = attrs.get('subType')
+
+        # Normalize empty string to None
+        if sub_type_val == "" or sub_type_val is None:
+            sub_type_val = None
+            attrs['subType'] = None
+
+        # Half Day & Leave MUST have a subType ('paid' or 'unpaid')
+        if status_val in ['half_day', 'leave']:
+            if sub_type_val not in ['paid', 'unpaid']:
+                raise serializers.ValidationError({
+                    "subType": f"subType ('paid' or 'unpaid') is required when status is '{status_val}'."
+                })
+
+        # Present & Absent must strictly reset subType to None
+        if status_val in ['present', 'absent', 'weekly_off']:
+            attrs['subType'] = None
+
+        # Clean up remarks nullability
+        if attrs.get('remarks') is None:
+            attrs['remarks'] = ''
+
+        return attrs
 
 
 class BulkAttendanceSerializer(serializers.Serializer):

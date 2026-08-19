@@ -616,31 +616,87 @@ def generate_payslip_data(salary_instance: EmployeeSalary) -> dict:
     }
 
 
-@transaction.atomic
-def bulk_record_attendance(date_val, records_list: list) -> list:
-    """
-    Bulk saves or updates attendance records inside transaction.atomic.
-    """
-    saved_records = []
-    for rec in records_list:
-        emp_id = rec.get("employeeId")
-        try:
-            emp = Employee.objects.get(id=emp_id, is_deleted=False)
-        except Employee.DoesNotExist:
-            continue
+def get_bulk_attendance_data(target_date) -> dict:
+    active_employees = Employee.objects.filter(
+        status="active",
+        is_deleted=False,
+        joining_date__lte=target_date
+    ).order_by("emp_no")
+    
+    records = Attendance.objects.filter(date=target_date)
+    is_already_marked = records.exists()
+    att_map = {att.employee_id: att for att in records}
 
-        att_obj, _ = Attendance.objects.update_or_create(
-            employee=emp,
-            date=date_val,
+    result_records = []
+    for emp in active_employees:
+        att = att_map.get(emp.id)
+        if att:
+            st = att.status
+            mapped_status = st
+            sub_type = None
+            if st == "half_paid":
+                mapped_status = "half_day"
+                sub_type = "paid"
+            elif st == "half_unpaid":
+                mapped_status = "half_day"
+                sub_type = "unpaid"
+            elif st == "leave_paid":
+                mapped_status = "leave"
+                sub_type = "paid"
+            elif st == "leave_unpaid":
+                mapped_status = "leave"
+                sub_type = "unpaid"
+            
+            result_records.append({
+                "employeeId": emp.id,
+                "empId": emp.emp_no,
+                "employeeName": emp.name,
+                "status": mapped_status,
+                "subType": sub_type,
+                "remarks": att.remarks,
+                "isMarked": True
+            })
+        else:
+            result_records.append({
+                "employeeId": emp.id,
+                "empId": emp.emp_no,
+                "employeeName": emp.name,
+                "status": None,
+                "subType": None,
+                "remarks": "",
+                "isMarked": False
+            })
+
+    return {
+        "date": target_date,
+        "isAlreadyMarked": is_already_marked,
+        "records": result_records
+    }
+
+
+@transaction.atomic
+def save_bulk_attendance_records(target_date, records_data: list) -> dict:
+    for rec in records_data:
+        emp_id = rec.get("employeeId")
+        front_status = rec.get("status")
+        sub_type = rec.get("subType")
+        remarks = rec.get("remarks", "")
+        
+        mapped_status = front_status
+        if front_status == "half_day":
+            mapped_status = "half_paid" if sub_type == "paid" else "half_unpaid"
+        elif front_status == "leave":
+            mapped_status = "leave_paid" if sub_type == "paid" else "leave_unpaid"
+        
+        Attendance.objects.update_or_create(
+            employee_id=emp_id,
+            date=target_date,
             defaults={
-                "status": rec.get("status"),
-                "check_in": rec.get("checkIn"),
-                "check_out": rec.get("checkOut"),
-                "remarks": rec.get("remarks"),
+                "status": mapped_status,
+                "remarks": remarks
             }
         )
-        saved_records.append(att_obj)
-    return saved_records
+    return {"success": True, "count": len(records_data)}
 
 
 def get_employee_360_overview(employee: Employee) -> dict:
@@ -932,18 +988,9 @@ def get_employee_advances_tab_data(employee: Employee) -> dict:
     }
 
 
-def get_employee_attendance_tab_data(employee: Employee, month: int = None, year: int = None) -> dict:
-    """
-    Constructs month calendar grid matrix, status counts, top cards, and daily logs list for an employee.
-    """
-    now = timezone.now().date()
-    if not month:
-        month = now.month
-    if not year:
-        year = now.year
-
+def get_employee_monthly_attendance_tab(employee: Employee, month: int, year: int) -> dict:
+    month_days = calendar.monthrange(year, month)[1]
     off_days_list = get_configured_weekly_off_days()
-    _, month_days = calendar.monthrange(year, month)
 
     att_qs = Attendance.objects.filter(employee=employee, date__year=year, date__month=month)
     att_map = {att.date.day: att for att in att_qs}
@@ -965,19 +1012,27 @@ def get_employee_attendance_tab_data(employee: Employee, month: int = None, year
         "half_unpaid": "½U",
         "leave_paid": "LP",
         "leave_unpaid": "LU",
+        "weekly_off": "off",
     }
+    
+    now = timezone.now().date()
 
     for day in range(1, month_days + 1):
         date_obj = datetime.date(year, month, day)
-        day_of_week_idx = date_obj.weekday()  # 0=Mon ... 6=Sun
+        day_of_week_idx = date_obj.weekday()
         day_name = date_obj.strftime("%a")
         is_off = day_of_week_idx in off_days_list
 
         att_record = att_map.get(day)
+        st = None
+        badge = None
+        remarks = ""
+        
         if att_record:
             st = att_record.status
-            badge = status_badge_map.get(st, "P")
-
+            badge = status_badge_map.get(st)
+            remarks = att_record.remarks
+            
             if st == "present":
                 present_count += 1
             elif st == "absent":
@@ -986,50 +1041,77 @@ def get_employee_attendance_tab_data(employee: Employee, month: int = None, year
                 half_day_count += 1
             elif st in ["leave_paid", "leave_unpaid"]:
                 leave_count += 1
-
+            elif st == "weekly_off":
+                off_days_count += 1
+            
             logs.append({
                 "id": att_record.id,
-                "date": date_obj,
+                "date": date_obj.strftime("%Y-%m-%d"),
                 "dayName": day_name,
-                "status": st,
+                "status": dict(Attendance.STATUS_CHOICES).get(st, st),
                 "statusCode": st,
-                "remarks": att_record.remarks,
-                "checkIn": att_record.check_in,
-                "checkOut": att_record.check_out,
+                "remarks": remarks,
             })
         else:
             if is_off:
                 st = "weekly_off"
-                badge = "OFF"
+                badge = "off"
                 off_days_count += 1
             else:
-                st = "not_marked"
-                badge = "-"
-                not_marked_count += 1
+                if date_obj > now:
+                    st = "not_marked"
+                    badge = None
+                else:
+                    st = "not_marked"
+                    badge = None
+                    not_marked_count += 1
 
         calendar_grid.append({
-            "date": date_obj,
+            "date": date_obj.strftime("%Y-%m-%d"),
             "day": day,
             "dayOfWeek": day_name,
             "status": st,
             "badge": badge,
             "isWeeklyOff": is_off,
         })
+        
+    logs.sort(key=lambda x: x["date"], reverse=True)
 
     return {
-        "cards": {
+        "alerts": {
             "totalAbsents": absent_count,
             "totalLeaves": leave_count,
             "totalHalfDays": half_day_count,
         },
         "summary": {
-            "presentCount": present_count,
-            "absentCount": absent_count,
-            "halfDayCount": half_day_count,
-            "leaveCount": leave_count,
-            "offDaysCount": off_days_count,
-            "notMarkedCount": not_marked_count,
+            "present": present_count,
+            "absent": absent_count,
+            "halfDay": half_day_count,
+            "leave": leave_count,
+            "offDays": off_days_count,
+            "notMarked": not_marked_count,
         },
         "calendarGrid": calendar_grid,
         "logs": logs,
+    }
+
+
+def calculate_employee_attendance_deduction(employee: Employee, month: int, year: int) -> dict:
+    total_month_days = calendar.monthrange(year, month)[1]
+    if total_month_days > 0:
+        per_day_salary = employee.current_salary / Decimal(total_month_days)
+    else:
+        per_day_salary = Decimal("0.00")
+
+    records = Attendance.objects.filter(employee=employee, date__year=year, date__month=month)
+    absent_count = records.filter(status="absent").count()
+    leave_unpaid_count = records.filter(status="leave_unpaid").count()
+    half_unpaid_count = records.filter(status="half_unpaid").count()
+
+    deduction_days = Decimal(absent_count) + Decimal(leave_unpaid_count) + (Decimal('0.5') * Decimal(half_unpaid_count))
+    attendance_deduction = _quantize_decimal(per_day_salary * deduction_days)
+
+    return {
+        "deductionDays": float(deduction_days),
+        "attendanceDeduction": float(attendance_deduction)
     }

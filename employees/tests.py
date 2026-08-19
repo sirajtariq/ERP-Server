@@ -298,7 +298,7 @@ class EmployeeAPITestCase(TestCase):
         # Test Attendance Tab Grid Matrix
         att_res = self.client.get(f"/api/attendance/?employeeId={self.emp.id}&month=8&year=2026")
         self.assertEqual(att_res.status_code, status.HTTP_200_OK)
-        self.assertIn("cards", att_res.data)
+        self.assertIn("alerts", att_res.data)
         self.assertIn("summary", att_res.data)
         self.assertIn("calendarGrid", att_res.data)
         self.assertIn("logs", att_res.data)
@@ -351,15 +351,13 @@ class EmployeeAPITestCase(TestCase):
                 {
                     "employeeId": self.emp.id,
                     "status": "present",
-                    "checkIn": "09:00:00",
-                    "checkOut": "17:00:00",
                     "remarks": "On time",
                 }
             ]
         }
         bulk_res = self.client.post("/api/attendance/bulk/", bulk_payload, format="json")
         self.assertEqual(bulk_res.status_code, status.HTTP_200_OK)
-        self.assertEqual(bulk_res.data["totalSaved"], 1)
+        self.assertEqual(bulk_res.data["count"], 1)
 
     def test_attendance_config_endpoint(self):
         res = self.client.get("/api/attendance/config/")
