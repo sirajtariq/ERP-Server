@@ -141,12 +141,18 @@ class SalesItemSerializer(serializers.ModelSerializer):
 
 class SalesItemNestedSerializer(serializers.ModelSerializer):
     """Nested line item serializer (invoice is set by the parent invoice)."""
+    itemId = serializers.IntegerField(source='product_id', required=False, allow_null=True)
+    itemCode = serializers.CharField(source='item_code', required=False, allow_null=True, allow_blank=True)
+    name = serializers.CharField(source='item_name', required=False, allow_blank=True)
+    quantity = serializers.DecimalField(max_digits=10, decimal_places=2, required=True)
+    unitPrice = serializers.DecimalField(source='rate', max_digits=12, decimal_places=2, required=True)
+    discount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, default=Decimal('0.00'))
     total = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     isReturned = serializers.SerializerMethodField()
 
     class Meta:
         model = SalesItem
-        fields = ["id", "item_name", "units", "quantity", "rate", "discount", "total", "isReturned"]
+        fields = ["id", "itemId", "itemCode", "name", "units", "quantity", "unitPrice", "discount", "total", "isReturned"]
         read_only_fields = ["id", "total"]
 
     def get_isReturned(self, obj):
