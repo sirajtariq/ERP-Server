@@ -336,6 +336,14 @@ class SalesItem(models.Model):
         on_delete=models.CASCADE,
         related_name="items",
     )
+    product = models.ForeignKey(
+        'inventory.Item',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='sales_items'
+    )
+    item_code = models.CharField(max_length=100, blank=True, null=True)
     item_name = models.CharField(max_length=255)
     units = models.CharField(max_length=50, default='pcs')
     quantity = models.DecimalField(max_digits=10, decimal_places=2)

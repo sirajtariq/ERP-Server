@@ -220,18 +220,18 @@ def process_sales_invoice_stock(invoice) -> list:
     movements = []
     with transaction.atomic():
         for line_item in invoice.items.all():
-            item_name = line_item.item_name
-            # Resolve item in inventory catalog (exact match or partial match)
-            item = Item.objects.filter(
-                Q(name__iexact=item_name) | Q(item_code__iexact=item_name),
-                is_deleted=False
-            ).select_for_update().first()
+            item = None
+            
+            if line_item.item_code:
+                item = Item.objects.filter(item_code__iexact=line_item.item_code, is_deleted=False).select_for_update().first()
+                
+            if not item and line_item.product_id:
+                item = Item.objects.filter(id=line_item.product_id, is_deleted=False).select_for_update().first()
 
-            if not item:
-                item = Item.objects.filter(
-                    name__icontains=item_name,
-                    is_deleted=False
-                ).select_for_update().first()
+            if not item and line_item.item_name:
+                item = Item.objects.filter(name__iexact=line_item.item_name, is_deleted=False).select_for_update().first()
+                if not item:
+                    item = Item.objects.filter(name__icontains=line_item.item_name, is_deleted=False).select_for_update().first()
 
             if not item:
                 continue
@@ -270,17 +270,18 @@ def process_purchase_bill_stock(bill) -> list:
     movements = []
     with transaction.atomic():
         for line_item in bill.items.all():
-            product_name = line_item.product_name
-            item = Item.objects.filter(
-                Q(name__iexact=product_name) | Q(item_code__iexact=product_name),
-                is_deleted=False
-            ).select_for_update().first()
+            item = None
+            
+            if line_item.item_code:
+                item = Item.objects.filter(item_code__iexact=line_item.item_code, is_deleted=False).select_for_update().first()
+                
+            if not item and line_item.product_id:
+                item = Item.objects.filter(id=line_item.product_id, is_deleted=False).select_for_update().first()
 
-            if not item:
-                item = Item.objects.filter(
-                    name__icontains=product_name,
-                    is_deleted=False
-                ).select_for_update().first()
+            if not item and line_item.product_name:
+                item = Item.objects.filter(name__iexact=line_item.product_name, is_deleted=False).select_for_update().first()
+                if not item:
+                    item = Item.objects.filter(name__icontains=line_item.product_name, is_deleted=False).select_for_update().first()
 
             if not item:
                 continue
