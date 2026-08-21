@@ -167,10 +167,13 @@ class PurchaseItemNestedSerializer(serializers.ModelSerializer):
     unit_price = serializers.DecimalField(source='purchase_price', max_digits=12, decimal_places=2, required=True)
     discount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, default=Decimal('0.00'))
     total = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    is_new = serializers.BooleanField(required=False, default=False, write_only=True)
+    category = serializers.CharField(required=False, allow_blank=True, allow_null=True, write_only=True)
+    sale_rate = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, allow_null=True, write_only=True)
 
     class Meta:
         model = PurchaseItem
-        fields = ["id", "item_id", "item_code", "item_name", "units", "quantity", "unit_price", "discount", "total"]
+        fields = ["id", "item_id", "item_code", "item_name", "units", "quantity", "unit_price", "discount", "total", "is_new", "category", "sale_rate"]
         read_only_fields = ["id", "total"]
 
 
@@ -711,8 +714,8 @@ class PurchaseInvoiceSerializer(serializers.ModelSerializer):
             invoice = PurchaseInvoice.objects.create(**validated_data)
             original_paid_amount = invoice.paid_amount
 
-            for item_data in items_data:
-                PurchaseItem.objects.create(invoice=invoice, **item_data)
+            from purchase.services import process_purchase_invoice_items
+            process_purchase_invoice_items(invoice, items_data)
 
             if (invoice.paid_amount > 0 or invoice.advance_applied > 0) and invoice.status == 'Draft':
                 invoice.status = 'Saved'
@@ -743,8 +746,8 @@ class PurchaseInvoiceSerializer(serializers.ModelSerializer):
 
             if items_data is not None:
                 instance.items.all().delete()
-                for item_data in items_data:
-                    PurchaseItem.objects.create(invoice=instance, **item_data)
+                from purchase.services import process_purchase_invoice_items
+                process_purchase_invoice_items(instance, items_data)
 
             if old_status != 'Saved' and instance.status == 'Saved':
                 instance.refresh_from_db()

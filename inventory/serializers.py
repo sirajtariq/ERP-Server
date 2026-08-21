@@ -161,7 +161,7 @@ class ItemSerializer(serializers.ModelSerializer):
 
         if queryset.exists():
             raise serializers.ValidationError(
-                f"Item code '{code}' pehle se mojood hai. Barah-e-karam koi doosra unique code enter karein."
+                f"Item code '{code}' already exists. Please enter a different unique code."
             )
         return code
 
