@@ -61,3 +61,54 @@ def reverse_auto_expense(reference_type: str, reference_id: int):
     )
     for exp in expenses:
         exp.delete()
+
+
+from rest_framework.exceptions import ValidationError
+from inventory.models import Item
+from purchase.models import PurchaseItem
+
+@transaction.atomic
+def process_purchase_invoice_items(invoice, items_data):
+    """
+    Processes line items for a purchase invoice. 
+    Creates inventory items on-the-fly if marked as new or missing an item_id.
+    Wrapped in transaction.atomic to ensure no orphan records or partial failures.
+    """
+    for item_data in items_data:
+        is_new = item_data.pop('is_new', False)
+        category = item_data.pop('category', None) or 'General'
+        sale_rate = item_data.pop('sale_rate', None) or Decimal('0.00')
+        
+        if is_new or not item_data.get('product_id'):
+            item_code = item_data.get('item_code')
+            
+            if item_code:
+                code_exists = Item.objects.filter(item_code__iexact=item_code, is_deleted=False).exists()
+                if code_exists:
+                    raise ValidationError(
+                        {"items": f"Item code '{item_code}' already exists. Please enter a different unique code."}
+                    )
+            
+            item_name = item_data.get('product_name', 'Unknown Item')
+            units = item_data.get('units') or 'pcs'
+            purchase_price = item_data.get('purchase_price', Decimal('0.00'))
+            
+            if not item_code:
+                import uuid
+                item_code = f"ITM-{uuid.uuid4().hex[:6].upper()}"
+                
+            new_item = Item.objects.create(
+                item_code=item_code,
+                name=item_name,
+                category=category,
+                unit=units,
+                purchase_rate=purchase_price,
+                sale_rate=sale_rate,
+                opening_stock=Decimal('0.00'),
+                min_stock=Decimal('0.00')
+            )
+            item_data['product_id'] = new_item.id
+            item_data['item_code'] = new_item.item_code
+            
+        PurchaseItem.objects.create(invoice=invoice, **item_data)
+

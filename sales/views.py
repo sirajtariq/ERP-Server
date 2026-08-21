@@ -971,11 +971,12 @@ class QuotationViewSet(viewsets.ModelViewSet):
             for q_item in quotation.items.all():
                 SalesItem.objects.create(
                     invoice=invoice,
-                    item_name=q_item.item_name,
-                    rate=q_item.rate,
-                    # Explicit Mappings:
-                    units=q_item.unit,
-                    quantity=q_item.qty,
+                    product=q_item.item,
+                    item_code=q_item.item_code,
+                    item_name=q_item.name,
+                    units=q_item.units,
+                    quantity=q_item.quantity,
+                    rate=q_item.unit_price,
                     discount=q_item.discount
                 )
                 
