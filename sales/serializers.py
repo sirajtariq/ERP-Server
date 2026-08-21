@@ -183,6 +183,7 @@ class SalesInvoiceListSerializer(serializers.ModelSerializer):
 
     invoiceNumber = serializers.CharField(source='invoice_number', read_only=True)
     customerName = serializers.SerializerMethodField()
+    customerType = serializers.SerializerMethodField()
     total = serializers.DecimalField(source='net_total', max_digits=12, decimal_places=2, read_only=True)
     paid = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     pending = serializers.SerializerMethodField()
@@ -198,6 +199,7 @@ class SalesInvoiceListSerializer(serializers.ModelSerializer):
             'id',
             'invoiceNumber',
             'customerName',
+            'customerType',
             'total',
             'paid',
             'pending',
@@ -215,6 +217,9 @@ class SalesInvoiceListSerializer(serializers.ModelSerializer):
 
     def get_customerName(self, obj):
         return obj.customer.customer_name if obj.customer else None
+
+    def get_customerType(self, obj):
+        return obj.customer.customer_type if obj.customer else None
 
     def get_pending(self, obj):
         value = obj.balance_due
