@@ -89,7 +89,7 @@ class DashboardCardsAPIView(APIView):
         supplier_payable = active_vendors.aggregate(total=Sum('payable_balance'))['total'] or Decimal('0.00')
         vendor_advance = active_vendors.aggregate(total=Sum('advance_balance'))['total'] or Decimal('0.00')
 
-        return Response({
+        response_data = {
             'total_sales': float(total_sales),
             'total_purchases': float(total_purchases),
             'receivable': float(receivable),
@@ -99,14 +99,29 @@ class DashboardCardsAPIView(APIView):
             'credit_sales': float(credit_sales),
             'total_sales_returns': float(total_sales_returns),
             'outgoing_expense': float(outgoing_expense),
-            'total_expenses': float(outgoing_expense),  # Added alias for clarity
+            'total_expenses': float(outgoing_expense),
             'supplier_payable': float(supplier_payable),
             'vendor_advance': float(vendor_advance),
             'supplier_paid': float(supplier_paid),
             'total_vendor_payments': float(supplier_paid),
             'total_cash_outflow': float(outgoing_expense + supplier_paid),
             'incoming_cash': float(incoming_cash),
-        })
+        }
+        
+        try:
+            from inventory.services import calculate_inventory_global_kpis
+            inventory_kpis = calculate_inventory_global_kpis()
+            response_data.update({
+                'total_products': inventory_kpis['totalItems'],
+                'low_stock_items': inventory_kpis['lowStockCount'],
+                'out_of_stock_items': inventory_kpis['outOfStockCount'],
+                'total_inventory_value': float(inventory_kpis['totalStockValue']),
+                'total_potential_revenue': float(inventory_kpis['totalPotentialRevenue']),
+            })
+        except Exception:
+            pass
+
+        return Response(response_data)
 
 
 class DashboardChartsAPIView(APIView):

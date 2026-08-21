@@ -196,6 +196,12 @@ class ItemDetailSerializer(serializers.ModelSerializer):
     profitPerItem = serializers.SerializerMethodField()
     stockValue = serializers.SerializerMethodField()
     profitMargin = serializers.SerializerMethodField()
+    saleValue = serializers.SerializerMethodField()
+    potentialProfit = serializers.SerializerMethodField()
+    totalInvested = serializers.SerializerMethodField()
+    revenueFromSales = serializers.SerializerMethodField()
+    realizedProfit = serializers.SerializerMethodField()
+    profitPerUnit = serializers.SerializerMethodField()
 
     class Meta:
         model = Item
@@ -217,6 +223,12 @@ class ItemDetailSerializer(serializers.ModelSerializer):
             'purchaseRate',
             'saleRate',
             'profitMargin',
+            'saleValue',
+            'potentialProfit',
+            'totalInvested',
+            'revenueFromSales',
+            'realizedProfit',
+            'profitPerUnit',
         ]
         read_only_fields = fields
 
@@ -245,6 +257,34 @@ class ItemDetailSerializer(serializers.ModelSerializer):
 
     def get_profitMargin(self, obj) -> float:
         return self._get_summary(obj)['profit_margin_pct']
+
+    def get_saleValue(self, obj) -> str:
+        summary = self._get_summary(obj)
+        val = summary['current_stock'] * (obj.sale_rate or Decimal('0.00'))
+        return f"{val:.2f}"
+
+    def get_potentialProfit(self, obj) -> str:
+        summary = self._get_summary(obj)
+        val = summary['current_stock'] * summary['profit_per_unit']
+        return f"{val:.2f}"
+
+    def get_totalInvested(self, obj) -> str:
+        summary = self._get_summary(obj)
+        val = summary['total_in'] * (obj.purchase_rate or Decimal('0.00'))
+        return f"{val:.2f}"
+
+    def get_revenueFromSales(self, obj) -> str:
+        summary = self._get_summary(obj)
+        val = summary['total_out'] * (obj.sale_rate or Decimal('0.00'))
+        return f"{val:.2f}"
+
+    def get_realizedProfit(self, obj) -> str:
+        summary = self._get_summary(obj)
+        val = summary['total_out'] * summary['profit_per_unit']
+        return f"{val:.2f}"
+
+    def get_profitPerUnit(self, obj) -> str:
+        return f"{self._get_summary(obj)['profit_per_unit']:.2f}"
 
 
 class StockMovementHistorySerializer(serializers.ModelSerializer):
