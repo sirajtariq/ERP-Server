@@ -860,18 +860,29 @@ class PaymentReceivedSerializer(serializers.ModelSerializer):
 
 
 class QuotationItemNestedSerializer(serializers.ModelSerializer):
+    itemId = serializers.IntegerField(source='item_id', required=False, allow_null=True)
+    itemCode = serializers.CharField(source='item_code', required=False, allow_null=True, allow_blank=True)
+    name = serializers.CharField(required=True)
+    units = serializers.CharField(required=False, allow_blank=True, default='pcs')
+    quantity = serializers.DecimalField(max_digits=12, decimal_places=2, required=True)
+    unitPrice = serializers.DecimalField(source='unit_price', max_digits=12, decimal_places=2, required=True)
+    discount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, default=Decimal('0.00'))
+    total = serializers.DecimalField(source='total_amount', max_digits=12, decimal_places=2, read_only=True)
+
     class Meta:
         model = QuotationItem
         fields = [
             'id',
-            'item_name',
-            'unit',
-            'qty',
-            'rate',
+            'itemId',
+            'itemCode',
+            'name',
+            'units',
+            'quantity',
+            'unitPrice',
             'discount',
-            'line_total',
+            'total',
         ]
-        read_only_fields = ['id', 'line_total']
+        read_only_fields = ['id', 'total']
 
 
 class QuotationListSerializer(serializers.ModelSerializer):

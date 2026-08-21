@@ -469,7 +469,7 @@ class Quotation(SoftDeleteModel):
 
     @property
     def subtotal(self):
-        return sum((item.line_total for item in self.items.all()), Decimal('0.00')).quantize(Decimal('0.01'))
+        return sum((item.total_amount for item in self.items.all()), Decimal('0.00')).quantize(Decimal('0.01'))
 
     @property
     def discount_amount(self):
@@ -559,21 +559,29 @@ class QuotationItem(models.Model):
         on_delete=models.CASCADE,
         related_name="items",
     )
-    item_name = models.CharField(max_length=255)
-    unit = models.CharField(max_length=50, default='pcs')
-    qty = models.DecimalField(max_digits=10, decimal_places=2)
-    rate = models.DecimalField(max_digits=12, decimal_places=2)
-    discount = models.DecimalField(max_digits=12, decimal_places=2, default=0.0, help_text="Discount percentage (0-100)")
+    item = models.ForeignKey(
+        'inventory.Item',
+        db_column='item_id',
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+    )
+    item_code = models.CharField(max_length=100, blank=True)
+    name = models.CharField(max_length=255)
+    units = models.CharField(max_length=50, blank=True)
+    quantity = models.DecimalField(max_digits=12, decimal_places=2)
+    unit_price = models.DecimalField(max_digits=12, decimal_places=2)
+    discount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
 
     class Meta:
         ordering = ["id"]
 
     @property
-    def line_total(self):
-        return (self.qty * self.rate) - ((self.qty * self.rate) * (self.discount / Decimal('100')))
+    def total_amount(self):
+        return (self.quantity * self.unit_price) - self.discount
 
     def __str__(self) -> str:
-        return f"{self.item_name} x{self.qty}"
+        return f"{self.name} x{self.quantity}"
 
 
 class SalesReturn(SoftDeleteModel):
