@@ -408,7 +408,19 @@ def record_salary_payment(employee: Employee, payload: dict) -> EmployeeSalary:
 
     # Process Payment Installment if amount provided
     payment_amount = _quantize_decimal(Decimal(str(payload.get("amount", "0.00"))))
+    
     if payment_amount > Decimal("0.00"):
+        # Ensure a salary cannot be paid more than its balance_remaining
+        current_balance = get_salary_balance_remaining(salary_obj)
+        
+        if current_balance <= Decimal("0.00") or salary_obj.status == 'paid':
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({"detail": "This salary is already fully paid. No further payments allowed."})
+            
+        if payment_amount > current_balance:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({"detail": f"Payment amount ({payment_amount}) exceeds remaining balance ({current_balance})."})
+
         payment_date = payload.get("paymentDate") or timezone.now().date()
         payment_method = payload.get("paymentMethod", "Cash")
         paid_by = payload.get("paidBy", "Finance Manager")
@@ -438,15 +450,16 @@ def record_salary_payment(employee: Employee, payload: dict) -> EmployeeSalary:
             pass
 
     # Re-evaluate total payments and status
-    total_paid_agg = salary_obj.payments.aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
+    total_paid_agg = sum(p.amount for p in salary_obj.payments.all())
     salary_obj.amount_paid = _quantize_decimal(total_paid_agg)
+    
+    try:
+        salary_obj.balance_remaining = max(Decimal('0.00'), salary_obj.net_salary - salary_obj.amount_paid)
+        balance_check = salary_obj.balance_remaining
+    except Exception:
+        balance_check = max(Decimal('0.00'), salary_obj.net_salary - salary_obj.amount_paid)
 
-    if salary_obj.amount_paid >= salary_obj.net_salary and salary_obj.net_salary > Decimal("0.00"):
-        salary_obj.status = "paid"
-    elif salary_obj.amount_paid > Decimal("0.00"):
-        salary_obj.status = "partial"
-    else:
-        salary_obj.status = "pending"
+    salary_obj.status = 'paid' if balance_check == Decimal('0.00') else ('partial' if salary_obj.amount_paid > Decimal('0.00') else 'unpaid')
 
     salary_obj.save()
     return salary_obj
@@ -527,92 +540,196 @@ def toggle_employee_status(employee: Employee, payload: dict) -> Employee:
     return employee
 
 
-def generate_payslip_data(salary_instance: EmployeeSalary) -> dict:
+def number_to_words(num):
+    """Lightweight, pure-Python helper for amount in words."""
+    try:
+        val = int(Decimal(str(num)))
+    except (ValueError, TypeError):
+        return "Zero"
+
+    if val == 0:
+        return "Zero"
+
+    units = ["", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten",
+             "Eleven", "Twelve", "Thirteen", "Fourteen", "Fifteen", "Sixteen", "Seventeen", "Eighteen", "Nineteen"]
+    tens = ["", "", "Twenty", "Thirty", "Forty", "Fifty", "Sixty", "Seventy", "Eighty", "Ninety"]
+
+    def convert_below_thousand(n):
+        if n == 0:
+            return ""
+        elif n < 20:
+            return units[n] + " "
+        elif n < 100:
+            return tens[n // 10] + (" " + units[n % 10] if n % 10 != 0 else "") + " "
+        else:
+            return units[n // 100] + " Hundred " + (convert_below_thousand(n % 100) if n % 100 != 0 else "")
+
+    if val < 0:
+        return "Minus " + number_to_words(abs(val))
+
+    words = ""
+    billions = val // 1000000000
+    millions = (val % 1000000000) // 1000000
+    thousands = (val % 1000000) // 1000
+    remainder = val % 1000
+
+    if billions > 0:
+        words += convert_below_thousand(billions) + "Billion "
+    if millions > 0:
+        words += convert_below_thousand(millions) + "Million "
+    if thousands > 0:
+        words += convert_below_thousand(thousands) + "Thousand "
+    if remainder > 0:
+        words += convert_below_thousand(remainder)
+
+    return words.strip() + " Only"
+
+
+def generate_payslip_data(salary: EmployeeSalary) -> dict:
     """
     Produces formatted printable JSON payload for a payslip document.
-    Includes Company Info, Employee Meta, Attendance summary, Earnings, Deductions, Net Salary, Amount in Words.
+    Dynamic version conforming to instructions.
     """
-    employee = salary_instance.employee
-    paid_amount = _quantize_decimal(salary_instance.amount_paid)
-    balance_remaining = get_salary_balance_remaining(salary_instance)
+    employee = salary.employee
+    
+    # 1. Dynamic Company Details Retrieval
+    try:
+        from erp_backend.models import BusinessSettings
+        settings = BusinessSettings.objects.first()
+        if not settings and hasattr(BusinessSettings, 'get_solo'):
+            settings = BusinessSettings.get_solo()
+    except Exception:
+        settings = None
 
-    basic = _quantize_decimal(salary_instance.basic_salary)
-    curr_sal = _quantize_decimal(salary_instance.current_salary)
-    bonus = _quantize_decimal(salary_instance.bonus)
-    total_earnings = _quantize_decimal(curr_sal + bonus)
+    company = {
+        "name": getattr(settings, 'company_name', None) or getattr(settings, 'business_name', 'Company Name'),
+        "address": getattr(settings, 'address', '') or "Company Address",
+        "phone": getattr(settings, 'phone', '') or getattr(settings, 'phone_number', ''),
+        "email": getattr(settings, 'email', '') or getattr(settings, 'company_email', '')
+    }
 
-    att_ded = _quantize_decimal(salary_instance.attendance_deduction)
-    adv_ded = _quantize_decimal(salary_instance.advance_deduction)
-    other_ded = _quantize_decimal(salary_instance.deductions)
-    total_deductions = _quantize_decimal(att_ded + adv_ded + other_ded)
+    # 2. Dynamic Employee Details
+    employee_details = {
+        "id": employee.id,
+        "empId": employee.emp_no or f"EMP-{employee.id:03d}",
+        "name": employee.name or f"{getattr(employee, 'first_name', '')} {getattr(employee, 'last_name', '')}".strip(),
+        "designation": str(employee.designation) if employee.designation else "Staff",
+        "department": str(employee.department) if employee.department else "General",
+        "joiningDate": str(employee.joining_date) if employee.joining_date else None,
+        "cnic": employee.cnic,
+        "phone": employee.phone
+    }
 
-    net_salary = _quantize_decimal(salary_instance.net_salary)
-    amount_in_words = num_to_words(net_salary)
+    # 3. Dynamic Payslip Metadata
+    issue_date = salary.created_at.strftime('%Y-%m-%d') if salary.created_at else str(timezone.now().date())
+    payslip_meta = {
+        "slipNo": f"SS-{salary.year}{salary.month:02d}-{employee.emp_no or employee.id}",
+        "month": salary.month,
+        "year": salary.year,
+        "issueDate": issue_date,
+        "status": salary.status
+    }
 
-    weekly_offs_count = max(0, salary_instance.month_days - salary_instance.working_days)
+    # 4. Dynamic Attendance & Deduction Audit
+    year = salary.year
+    month = salary.month
+    month_days = calendar.monthrange(year, month)[1]
+    
+    weekly_offs = 0
+    for day in range(1, month_days + 1):
+        if datetime.date(year, month, day).weekday() in [5, 6]:
+            weekly_offs += 1
 
+    records = Attendance.objects.filter(employee_id=employee.id, date__year=year, date__month=month)
+    present_days = records.filter(status__in=['present', 'leave', 'holiday', 'leave_paid', 'leave_unpaid', 'paid_leave', 'unpaid_leave']).count()
+    absent_days = records.filter(status__in=['absent']).count()
+    half_days = records.filter(status__in=['half_day', 'half_paid', 'half_unpaid']).count()
+    
+    working_days = float(salary.working_days or (present_days + half_days * 0.5))
+
+    # 1. Stored Record Snapshot Mapping
+    saved_base_salary = float(getattr(salary, 'current_salary', None) or getattr(salary, 'basic_salary', 0) or getattr(employee, 'current_salary', 0) or 0)
+    
+    try:
+        base_net = float(salary.net_salary or 0)
+        base_bonus = float(salary.bonus or 0)
+        base_ded = float(salary.deductions or 0)
+        base_adv = float(salary.advance_deduction or 0)
+        
+        saved_earned_salary = float(
+            getattr(salary, 'earned_salary', None) or 
+            getattr(salary, 'basic_earned', None) or 
+            (base_net - base_bonus + base_ded + base_adv)
+        )
+    except Exception:
+        saved_earned_salary = 0.0
+
+    saved_bonus = float(salary.bonus or 0)
+    saved_other_deductions = float(salary.deductions or 0)
+    saved_advance_deduction = float(salary.advance_deduction or 0)
+    saved_net_salary = float(salary.net_salary or 0)
+    
+    if salary.amount_paid:
+        saved_paid_amount = float(salary.amount_paid)
+    else:
+        saved_paid_amount = float(sum(p.amount for p in salary.payments.all()) or 0)
+        
+    try:
+        saved_balance_remaining = float(get_salary_balance_remaining(salary))
+    except Exception:
+        saved_balance_remaining = float(saved_net_salary - saved_paid_amount)
+
+    # 2. Derive Attendance Deduction from Saved Snapshot
+    stored_attendance_deduction = max(0.0, round(saved_base_salary - saved_earned_salary, 2))
+    total_earnings = round(saved_base_salary + saved_bonus, 2)
+    total_deductions = round(stored_attendance_deduction + saved_advance_deduction + saved_other_deductions, 2)
+
+    amount_in_words = number_to_words(saved_net_salary)
+
+    # 7. Dynamic Payments Array
+    payments = []
+    for p in salary.payments.all().order_by('-payment_date', '-id'):
+        payments.append({
+            "id": p.id,
+            "paymentDate": str(p.payment_date),
+            "amount": float(p.amount),
+            "paymentMethod": p.payment_method,
+            "paidBy": p.paid_by,
+            "remarks": p.remarks
+        })
+
+    # 8. Return the complete nested payslip JSON response
     return {
-        "company": {
-            "name": "LenDen ERP Systems",
-            "address": "Headquarters, Industrial Zone, Pakistan",
-            "phone": "+92-42-111-222-333",
-            "email": "payroll@lenden.erp",
-        },
-        "employee": {
-            "id": employee.id,
-            "empId": employee.emp_no,
-            "name": employee.name,
-            "designation": employee.designation,
-            "department": employee.department,
-            "joiningDate": employee.joining_date,
-            "cnic": employee.cnic,
-            "phone": employee.phone,
-        },
-        "payslip": {
-            "slipNo": salary_instance.slip_no,
-            "month": salary_instance.month,
-            "year": salary_instance.year,
-            "issueDate": salary_instance.created_at.date(),
-            "status": salary_instance.status,
-        },
+        "company": company,
+        "employee": employee_details,
+        "payslip": payslip_meta,
         "attendance": {
-            "monthDays": salary_instance.month_days,
-            "workingDays": salary_instance.working_days,
-            "weeklyOffs": weekly_offs_count,
-            "absentDays": salary_instance.absent_days,
-            "halfUnpaidDays": salary_instance.half_unpaid_days,
-            "leaveUnpaidDays": salary_instance.leave_unpaid_days,
-            "attendanceDeduction": att_ded,
+            "monthDays": month_days,
+            "workingDays": working_days,
+            "presentDays": present_days,
+            "absentDays": absent_days,
+            "halfDays": half_days,
+            "weeklyOffs": weekly_offs,
         },
         "earnings": {
-            "basicSalary": basic,
-            "currentSalary": curr_sal,
-            "bonus": bonus,
-            "totalEarnings": total_earnings,
+            "basicSalary": saved_base_salary,
+            "currentSalary": saved_base_salary,
+            "bonus": saved_bonus,
+            "totalEarnings": total_earnings
         },
         "deductions": {
-            "attendanceDeduction": att_ded,
-            "advanceDeduction": adv_ded,
-            "otherDeductions": other_ded,
-            "totalDeductions": total_deductions,
+            "attendanceDeduction": stored_attendance_deduction,
+            "advanceDeduction": saved_advance_deduction,
+            "otherDeductions": saved_other_deductions,
+            "totalDeductions": total_deductions
         },
         "summary": {
-            "netSalary": net_salary,
-            "paidAmount": paid_amount,
-            "balanceRemaining": balance_remaining,
-            "amountInWords": amount_in_words,
+            "netSalary": saved_net_salary,
+            "paidAmount": saved_paid_amount,
+            "balanceRemaining": saved_balance_remaining,
+            "amountInWords": amount_in_words
         },
-        "payments": [
-            {
-                "id": p.id,
-                "paymentDate": p.payment_date,
-                "amount": _quantize_decimal(p.amount),
-                "paymentMethod": p.payment_method,
-                "paidBy": p.paid_by,
-                "remarks": p.remarks,
-            }
-            for p in salary_instance.payments.all()
-        ]
+        "payments": payments
     }
 
 

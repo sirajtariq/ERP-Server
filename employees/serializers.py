@@ -71,8 +71,10 @@ class EmployeeListSerializer(serializers.ModelSerializer):
     joiningDate = serializers.DateField(source="joining_date", read_only=True)
     lastWorkingDate = serializers.DateField(source="leaving_date", read_only=True)
     rejoiningDate = serializers.DateField(source="rejoining_date", read_only=True)
-    advance = serializers.SerializerMethodField()
     salary = serializers.SerializerMethodField()
+    pendingSalary = serializers.SerializerMethodField()
+    advanceBalance = serializers.SerializerMethodField()
+    netSettlementAmount = serializers.SerializerMethodField()
 
     class Meta:
         model = Employee
@@ -84,20 +86,45 @@ class EmployeeListSerializer(serializers.ModelSerializer):
             "department",
             "joiningDate",
             "salary",
-            "advance",
+            "pendingSalary",
+            "advanceBalance",
+            "netSettlementAmount",
             "status",
             "lastWorkingDate",
             "rejoiningDate",
         ]
 
-    def get_advance(self, obj):
-        return services.calculate_employee_advance_balance(obj)
-
     def get_salary(self, obj):
         return {
-            "basicSalary": services._quantize_decimal(obj.basic_salary),
-            "currentSalary": services._quantize_decimal(obj.current_salary),
+            "basicSalary": float(services._quantize_decimal(obj.basic_salary)),
+            "currentSalary": float(services._quantize_decimal(obj.current_salary)),
         }
+
+    def get_pendingSalary(self, obj):
+        if hasattr(obj, 'annotated_pending_salary'):
+            return float(obj.annotated_pending_salary or 0.0)
+        return float(sum(s.balance_remaining for s in obj.salaries.all() if s.status in ['unpaid', 'partial']))
+
+    def get_advanceBalance(self, obj):
+        if hasattr(obj, 'annotated_advance_balance'):
+            return float(obj.annotated_advance_balance or 0.0)
+        return float(services.calculate_employee_advance_balance(obj))
+
+    def get_netSettlementAmount(self, obj):
+        pending = self.get_pendingSalary(obj)
+        adv = self.get_advanceBalance(obj)
+        
+        if hasattr(obj, 'current_present_days') and hasattr(obj, 'current_half_days'):
+            import calendar
+            from django.utils import timezone
+            now = timezone.now()
+            month_days = calendar.monthrange(now.year, now.month)[1]
+            daily_rate = float(obj.current_salary or 0) / float(month_days)
+            payable_days = float(obj.current_present_days or 0) + (float(obj.current_half_days or 0) * 0.5)
+            accrued = round(payable_days * daily_rate, 2)
+            return round(pending + accrued - adv, 2)
+        
+        return round(pending - adv, 2)
 
 
 class AttendanceSerializer(serializers.ModelSerializer):
