@@ -957,6 +957,48 @@ class QuotationViewSet(viewsets.ModelViewSet):
             from sales.utils import get_or_create_customer_from_data
             customer = get_or_create_customer_from_data(quotation.customer_data)
             
+            from inventory.models import Item
+            from inventory.services import get_item_current_stock, process_sales_invoice_stock
+            
+            for q_item in quotation.items.all():
+                target_item = q_item.item
+                
+                # Step B: Item Code Fallback
+                if not target_item and q_item.item_code:
+                    target_item = Item.objects.filter(item_code__iexact=q_item.item_code.strip(), is_deleted=False).first()
+                
+                # Step C: Name Fallback
+                if not target_item and q_item.name:
+                    target_item = Item.objects.filter(name__iexact=q_item.name.strip(), is_deleted=False).first()
+                
+                # Step D: Persist Resolution
+                if target_item and not q_item.item:
+                    q_item.item = target_item
+                    q_item.save(update_fields=['item'])
+
+                # CHECK 1: Item Still Unregistered / Not Found
+                if not target_item:
+                    return Response(
+                        {
+                            "error": "Item not registered",
+                            "message": f"Cannot convert quotation to invoice. Item '{q_item.name}' is not registered in inventory. Please create and purchase this item first."
+                        },
+                        status=drf_status.HTTP_400_BAD_REQUEST
+                    )
+                
+                # CHECK 2: Stock Availability (For Products Only)
+                if target_item.item_type == 'product':
+                    current_stock = get_item_current_stock(target_item)
+                    if current_stock < q_item.quantity:
+                        shortage = q_item.quantity - current_stock
+                        return Response(
+                            {
+                                "error": "Insufficient stock",
+                                "message": f"Cannot convert quotation to invoice. Item '{target_item.name}' has only {current_stock} units in stock (Required: {q_item.quantity}, Shortage: {shortage}). Please add a purchase invoice first."
+                            },
+                            status=drf_status.HTTP_400_BAD_REQUEST
+                        )
+            
             # Map Quotation fields to SalesInvoice fields exactly
             invoice = SalesInvoice.objects.create(
                 customer=customer,
@@ -965,7 +1007,7 @@ class QuotationViewSet(viewsets.ModelViewSet):
                 # Explicit Mappings:
                 invoice_discount=quotation.discount_percentage,
                 vat_percentage=quotation.vat_percentage,
-                status='Draft'  # Draft status as safety
+                status='Saved'  # Saved status to trigger stock and accounting
             )
             
             for q_item in quotation.items.all():
@@ -980,11 +1022,16 @@ class QuotationViewSet(viewsets.ModelViewSet):
                     discount=q_item.discount
                 )
                 
+            from decimal import Decimal
+            from sales.serializers import QuotationDetailSerializer, SalesInvoiceSerializer
+            
+            invoice.refresh_from_db()
+            SalesInvoiceSerializer()._apply_invoice_balance_effects(invoice, Decimal('0.00'))
+            process_sales_invoice_stock(invoice)
+                
             quotation.status = 'converted'
             quotation.converted_invoice = invoice
             quotation.save(update_fields=['status', 'converted_invoice', 'updated_at'])
-            
-            from sales.serializers import QuotationDetailSerializer, SalesInvoiceSerializer
             
             # Return both records
             return Response({

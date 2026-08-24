@@ -518,8 +518,9 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                             avail_stock += prev_movement.quantity
 
                     if req_qty > avail_stock:
+                        shortage = req_qty - avail_stock
                         raise serializers.ValidationError({
-                            "detail": f"Insufficient stock for '{inv_item.name}'. Available: {avail_stock:.2f}, Requested: {req_qty:.2f}"
+                            "detail": f"Cannot create sale invoice. Item '{inv_item.name}' has only {avail_stock} units in stock (Required: {req_qty}, Shortage: {shortage}). Please add a purchase invoice first."
                         })
 
         return attrs
