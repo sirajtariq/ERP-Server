@@ -67,7 +67,49 @@ class EmployeeViewSet(viewsets.ModelViewSet):
     pagination_class = EmployeePagination
 
     def get_queryset(self):
-        qs = Employee.objects.filter(is_deleted=False).order_by("-id")
+        from django.db.models import Sum, Q, Value, DecimalField, F, Count
+        from django.db.models.functions import Coalesce
+        from django.utils import timezone
+
+        now = timezone.now()
+
+        qs = Employee.objects.filter(is_deleted=False).annotate(
+            annotated_pending_salary=Coalesce(
+                Sum(
+                    F('salaries__net_salary') - F('salaries__amount_paid'), 
+                    filter=Q(salaries__status__in=['unpaid', 'partial'])
+                ),
+                Value(0.00),
+                output_field=DecimalField()
+            ),
+            annotated_advance_balance=Coalesce(
+                Sum(
+                    F('advances__amount') - F('advances__recovered_amount'),
+                    filter=Q(advances__status__in=['pending', 'partial'])
+                ),
+                Value(0.00),
+                output_field=DecimalField()
+            ),
+            current_present_days=Count(
+                'attendances',
+                filter=Q(
+                    attendances__date__year=now.year,
+                    attendances__date__month=now.month,
+                    attendances__status__in=['present', 'weekly_off', 'leave_paid', 'leave_unpaid']
+                ),
+                distinct=True
+            ),
+            current_half_days=Count(
+                'attendances',
+                filter=Q(
+                    attendances__date__year=now.year,
+                    attendances__date__month=now.month,
+                    attendances__status__in=['half_paid', 'half_unpaid', 'half_day']
+                ),
+                distinct=True
+            )
+        ).order_by("-id")
+
         params = self.request.query_params
 
         search = (
