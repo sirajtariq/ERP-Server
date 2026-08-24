@@ -393,11 +393,7 @@ class AttendanceViewSet(viewsets.ModelViewSet):
                     "remarks": None,
                 })
 
-        return Response({
-            "date": target_date,
-            "totalEmployees": len(sheet),
-            "records": sheet,
-        }, status=status.HTTP_200_OK)
+        return Response(sheet, status=status.HTTP_200_OK)
 
     @extend_schema(summary="Get configured weekly off days and salary calculation basis for frontend.")
     @action(detail=False, methods=["get"], url_path="config")
@@ -437,7 +433,7 @@ class AttendanceViewSet(viewsets.ModelViewSet):
             except ValueError:
                 return Response({"detail": "Invalid date format. Use YYYY-MM-DD."}, status=status.HTTP_400_BAD_REQUEST)
             data = services.get_bulk_attendance_data(target_date)
-            return Response(data, status=status.HTTP_200_OK)
+            return Response(data["records"], status=status.HTTP_200_OK)
         else:
             serializer = BulkAttendanceSerializer(data=request.data)
             serializer.is_valid(raise_exception=True)
