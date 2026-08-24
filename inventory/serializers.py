@@ -97,7 +97,7 @@ class ItemSerializer(serializers.ModelSerializer):
     Outputs strict camelCase JSON response payloads.
     """
     itemCode = serializers.CharField(source='item_code')
-    itemType = serializers.ChoiceField(choices=['product', 'service'], default='product', required=False)
+    itemType = serializers.ChoiceField(source='item_type', choices=['product', 'service'], default='product', required=False)
     purchaseRate = serializers.DecimalField(source='purchase_rate', max_digits=12, decimal_places=2, default=Decimal('0.00'), required=False)
     saleRate = serializers.DecimalField(source='sale_rate', max_digits=12, decimal_places=2, default=Decimal('0.00'), required=False)
     openingStock = serializers.DecimalField(source='opening_stock', max_digits=12, decimal_places=2, default=Decimal('0.00'), required=False)
@@ -172,6 +172,8 @@ class ItemSerializer(serializers.ModelSerializer):
         return code
 
     def create(self, validated_data):
+        if 'itemType' in validated_data:
+            validated_data['item_type'] = validated_data.pop('itemType')
         item = Item.objects.create(**validated_data)
         if item.opening_stock > Decimal('0.00'):
             services.record_stock_movement(
@@ -182,6 +184,11 @@ class ItemSerializer(serializers.ModelSerializer):
                 ref_type='opening'
             )
         return item
+
+    def update(self, instance, validated_data):
+        if 'itemType' in validated_data:
+            validated_data['item_type'] = validated_data.pop('itemType')
+        return super().update(instance, validated_data)
 
 
 class ItemDetailSerializer(serializers.ModelSerializer):

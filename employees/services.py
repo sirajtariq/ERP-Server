@@ -730,6 +730,47 @@ def get_employee_360_overview(employee: Employee) -> dict:
     ).count()
     attendance_alert_badge = f"{current_month_absents}A" if current_month_absents > 0 else ""
 
+    all_salaries = EmployeeSalary.objects.filter(employee=employee)
+    total_earned = sum((s.net_salary for s in all_salaries), Decimal("0.00"))
+    total_paid = sum((s.amount_paid for s in all_salaries), Decimal("0.00"))
+    pending_balance = max(Decimal("0.00"), total_earned - total_paid)
+
+    import calendar
+    now = timezone.now()
+    
+    total_days_in_month = 0
+    try:
+        from erp_backend.models import BusinessSettings
+        biz = BusinessSettings.get_solo()
+        basis = getattr(biz, 'salary_calculation_basis', 'month_days')
+
+        if basis == 'fixed_30':
+            total_days_in_month = 30
+        elif basis == 'working_days':
+            total_days_in_month = getattr(biz, 'standard_working_days', None) or 26
+        elif basis == 'month_days':
+            total_days_in_month = calendar.monthrange(now.year, now.month)[1]
+        else:
+            total_days_in_month = calendar.monthrange(now.year, now.month)[1]
+    except Exception:
+        total_days_in_month = calendar.monthrange(now.year, now.month)[1]
+
+    daily_rate = Decimal(employee.current_salary or 0) / Decimal(total_days_in_month)
+    
+    present_days = Attendance.objects.filter(
+        employee=employee, date__year=now.year, date__month=now.month,
+        status__in=['present', 'weekly_off', 'leave_paid', 'leave_unpaid']
+    ).count()
+    
+    half_days = Attendance.objects.filter(
+        employee=employee, date__year=now.year, date__month=now.month,
+        status__in=['half_paid', 'half_unpaid']
+    ).count()
+    
+    payable_days = Decimal(present_days) + (Decimal(half_days) * Decimal('0.5'))
+    current_month_accrued = round(payable_days * daily_rate, 2)
+    net_settlement_amount = pending_balance + current_month_accrued
+
     return {
         "header": {
             "id": employee.id,
@@ -767,6 +808,13 @@ def get_employee_360_overview(employee: Employee) -> dict:
             "currentSalary": _quantize_decimal(employee.current_salary),
             "totalIncremented": _quantize_decimal(total_incremented),
             "noOfIncrements": no_of_increments,
+            "totalEarned": _quantize_decimal(total_earned),
+            "totalPaid": _quantize_decimal(total_paid),
+            "pendingBalance": _quantize_decimal(pending_balance),
+            "baseSalary": _quantize_decimal(employee.current_salary),
+            "currentMonthDaysWorked": float(payable_days),
+            "currentMonthAccrued": float(current_month_accrued),
+            "netSettlementAmount": float(net_settlement_amount),
         },
     }
 
@@ -782,6 +830,8 @@ def get_employee_salaries_tab_summary(employee: Employee) -> dict:
     pending_salary = Decimal("0.00")
     partial_pending_count = 0
 
+    total_earned = Decimal("0.00")
+
     for s in salaries:
         paid_amt = _quantize_decimal(s.amount_paid)
         bonus_amt = _quantize_decimal(s.bonus)
@@ -789,16 +839,61 @@ def get_employee_salaries_tab_summary(employee: Employee) -> dict:
 
         total_paid += paid_amt
         total_bonus += bonus_amt
+        total_earned += _quantize_decimal(s.net_salary)
 
         if s.status in ["pending", "partial"]:
             pending_salary += balance
             partial_pending_count += 1
+            
+    pending_balance = max(Decimal("0.00"), total_earned - total_paid)
+
+    import calendar
+    now = timezone.now()
+    
+    total_days_in_month = 0
+    try:
+        from erp_backend.models import BusinessSettings
+        biz = BusinessSettings.get_solo()
+        basis = getattr(biz, 'salary_calculation_basis', 'month_days')
+
+        if basis == 'fixed_30':
+            total_days_in_month = 30
+        elif basis == 'working_days':
+            total_days_in_month = getattr(biz, 'standard_working_days', None) or 26
+        elif basis == 'month_days':
+            total_days_in_month = calendar.monthrange(now.year, now.month)[1]
+        else:
+            total_days_in_month = calendar.monthrange(now.year, now.month)[1]
+    except Exception:
+        total_days_in_month = calendar.monthrange(now.year, now.month)[1]
+
+    daily_rate = Decimal(employee.current_salary or 0) / Decimal(total_days_in_month)
+    
+    present_days = Attendance.objects.filter(
+        employee=employee, date__year=now.year, date__month=now.month,
+        status__in=['present', 'weekly_off', 'leave_paid', 'leave_unpaid']
+    ).count()
+    
+    half_days = Attendance.objects.filter(
+        employee=employee, date__year=now.year, date__month=now.month,
+        status__in=['half_paid', 'half_unpaid']
+    ).count()
+    
+    payable_days = Decimal(present_days) + (Decimal(half_days) * Decimal('0.5'))
+    current_month_accrued = round(payable_days * daily_rate, 2)
+    net_settlement_amount = pending_balance + current_month_accrued
 
     return {
         "totalPaid": _quantize_decimal(total_paid),
         "totalBonus": _quantize_decimal(total_bonus),
         "pendingSalary": _quantize_decimal(pending_salary),
         "partialPendingCount": partial_pending_count,
+        "totalEarned": _quantize_decimal(total_earned),
+        "pendingBalance": _quantize_decimal(pending_balance),
+        "baseSalary": _quantize_decimal(employee.current_salary),
+        "currentMonthDaysWorked": float(payable_days),
+        "currentMonthAccrued": float(current_month_accrued),
+        "netSettlementAmount": float(net_settlement_amount),
     }
 
 
