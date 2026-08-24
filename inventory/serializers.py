@@ -44,6 +44,7 @@ class ItemListSerializer(serializers.ModelSerializer):
     Outputs strict camelCase JSON keys.
     """
     itemCode = serializers.CharField(source='item_code', read_only=True)
+    itemType = serializers.CharField(source='item_type', read_only=True)
     purchaseRate = serializers.DecimalField(source='purchase_rate', max_digits=12, decimal_places=2, read_only=True)
     saleRate = serializers.DecimalField(source='sale_rate', max_digits=12, decimal_places=2, read_only=True)
     profitMarginPct = serializers.SerializerMethodField()
@@ -56,6 +57,7 @@ class ItemListSerializer(serializers.ModelSerializer):
         fields = [
             'id',
             'itemCode',
+            'itemType',
             'name',
             'category',
             'unit',
@@ -95,6 +97,7 @@ class ItemSerializer(serializers.ModelSerializer):
     Outputs strict camelCase JSON response payloads.
     """
     itemCode = serializers.CharField(source='item_code')
+    itemType = serializers.ChoiceField(choices=['product', 'service'], default='product', required=False)
     purchaseRate = serializers.DecimalField(source='purchase_rate', max_digits=12, decimal_places=2, default=Decimal('0.00'), required=False)
     saleRate = serializers.DecimalField(source='sale_rate', max_digits=12, decimal_places=2, default=Decimal('0.00'), required=False)
     openingStock = serializers.DecimalField(source='opening_stock', max_digits=12, decimal_places=2, default=Decimal('0.00'), required=False)
@@ -111,6 +114,7 @@ class ItemSerializer(serializers.ModelSerializer):
         fields = [
             'id',
             'itemCode',
+            'itemType',
             'name',
             'category',
             'unit',
@@ -132,6 +136,8 @@ class ItemSerializer(serializers.ModelSerializer):
         data = data.copy()
         if 'item_code' in data and 'itemCode' not in data:
             data['itemCode'] = data['item_code']
+        if 'item_type' in data and 'itemType' not in data:
+            data['itemType'] = data['item_type']
         if 'purchase_rate' in data and 'purchaseRate' not in data:
             data['purchaseRate'] = data['purchase_rate']
         if 'sale_rate' in data and 'saleRate' not in data:
@@ -185,6 +191,7 @@ class ItemDetailSerializer(serializers.ModelSerializer):
     """
     itemName = serializers.CharField(source='name', read_only=True)
     itemCode = serializers.CharField(source='item_code', read_only=True)
+    itemType = serializers.CharField(source='item_type', read_only=True)
     itemStatus = serializers.SerializerMethodField()
     minStock = serializers.DecimalField(source='min_stock', max_digits=12, decimal_places=2, read_only=True)
     openingStock = serializers.DecimalField(source='opening_stock', max_digits=12, decimal_places=2, read_only=True)
@@ -209,6 +216,7 @@ class ItemDetailSerializer(serializers.ModelSerializer):
             'id',
             'itemName',
             'itemCode',
+            'itemType',
             'itemStatus',
             'category',
             'unit',

@@ -233,7 +233,7 @@ def process_sales_invoice_stock(invoice) -> list:
                 if not item:
                     item = Item.objects.filter(name__icontains=line_item.item_name, is_deleted=False).select_for_update().first()
 
-            if not item:
+            if not item or item.item_type == 'service':
                 continue
 
             current_stock = get_item_current_stock(item)
@@ -283,7 +283,7 @@ def process_purchase_bill_stock(bill) -> list:
                 if not item:
                     item = Item.objects.filter(name__icontains=line_item.product_name, is_deleted=False).select_for_update().first()
 
-            if not item:
+            if not item or item.item_type == 'service':
                 continue
 
             qty = Decimal(str(line_item.quantity))
@@ -344,7 +344,7 @@ def process_sales_return_stock(sales_return) -> list:
                     is_deleted=False
                 ).select_for_update().first()
 
-            if not item:
+            if not item or item.item_type == 'service':
                 continue
 
             qty = Decimal(str(line_item.quantity))

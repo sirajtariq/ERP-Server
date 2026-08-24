@@ -13,6 +13,7 @@ class Item(models.Model):
     item_code = models.CharField(max_length=100, db_index=True)
     name = models.CharField(max_length=255, db_index=True)
     category = models.CharField(max_length=100, db_index=True)
+    item_type = models.CharField(max_length=20, choices=[('product', 'Product'), ('service', 'Service')], default='product')
     unit = models.CharField(max_length=50)
     purchase_rate = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
     sale_rate = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))

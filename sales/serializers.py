@@ -504,6 +504,9 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                     inv_item = Item.objects.filter(name__icontains=name_str, is_deleted=False).first()
 
                 if inv_item:
+                    if inv_item.item_type == 'service':
+                        continue
+
                     avail_stock = get_item_current_stock(inv_item)
                     if self.instance and self.instance.status == 'Saved':
                         prev_movement = StockMovement.objects.filter(
@@ -515,8 +518,9 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                             avail_stock += prev_movement.quantity
 
                     if req_qty > avail_stock:
+                        shortage = req_qty - avail_stock
                         raise serializers.ValidationError({
-                            "detail": f"Insufficient stock for '{inv_item.name}'. Available: {avail_stock:.2f}, Requested: {req_qty:.2f}"
+                            "detail": f"Cannot create sale invoice. Item '{inv_item.name}' has only {avail_stock} units in stock (Required: {req_qty}, Shortage: {shortage}). Please add a purchase invoice first."
                         })
 
         return attrs
