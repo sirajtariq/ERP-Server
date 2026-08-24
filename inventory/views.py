@@ -59,6 +59,10 @@ class ItemViewSet(viewsets.ModelViewSet):
         if category and category.lower() != 'all':
             qs = qs.filter(category__iexact=category)
 
+        item_type = params.get('itemType', '').strip()
+        if item_type and item_type.lower() != 'all':
+            qs = qs.filter(item_type__iexact=item_type)
+
         search = params.get('search', '').strip()
         if search:
             qs = qs.filter(
@@ -105,6 +109,11 @@ class ItemViewSet(viewsets.ModelViewSet):
             openapi.Parameter(
                 "category", openapi.IN_QUERY,
                 description="Filter by category",
+                type=openapi.TYPE_STRING,
+            ),
+            openapi.Parameter(
+                "itemType", openapi.IN_QUERY,
+                description="Filter by item type (product or service)",
                 type=openapi.TYPE_STRING,
             ),
             openapi.Parameter(

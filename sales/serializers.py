@@ -504,6 +504,9 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                     inv_item = Item.objects.filter(name__icontains=name_str, is_deleted=False).first()
 
                 if inv_item:
+                    if inv_item.item_type == 'service':
+                        continue
+
                     avail_stock = get_item_current_stock(inv_item)
                     if self.instance and self.instance.status == 'Saved':
                         prev_movement = StockMovement.objects.filter(
