@@ -235,38 +235,7 @@ class SalesInvoice(SoftDeleteModel):
         a) Direct payments linked to this invoice
         b) Unallocated general advances consumed sequentially (FIFO) by older unpaid invoices.
         """
-        from sales.models import PaymentReceived
-        
-        direct_payments = sum((p.amount_received for p in self.payments.all()), Decimal('0.00'))
-        
-        if not self.customer:
-            return min(self.net_total_after_returns, direct_payments).quantize(Decimal('0.01'))
-            
-        general_payments = PaymentReceived.objects.filter(
-            customer=self.customer, invoice__isnull=True
-        ).order_by('date', 'id')
-        total_advance = sum((p.amount_received for p in general_payments), Decimal('0.00'))
-        
-        older_invoices = self.customer.invoices.filter(
-            status='Saved', id__lt=self.id
-        ).order_by('date', 'id')
-        
-        for inv in older_invoices:
-            if total_advance <= Decimal('0.00'):
-                break
-            inv_direct = sum((p.amount_received for p in inv.payments.all()), Decimal('0.00'))
-            inv_need = inv.net_total_after_returns - inv_direct
-            if inv_need > Decimal('0.00'):
-                consumed = min(total_advance, inv_need)
-                total_advance -= consumed
-                
-        this_need = self.net_total_after_returns - direct_payments
-        consumed_here = Decimal('0.00')
-        if this_need > Decimal('0.00') and total_advance > Decimal('0.00'):
-            consumed_here = min(total_advance, this_need)
-            
-        total_paid = direct_payments + consumed_here
-        return min(self.net_total_after_returns, total_paid).quantize(Decimal('0.01'))
+        return self.paid_amount.quantize(Decimal('0.01'))
 
     @property
     def balance_due(self):

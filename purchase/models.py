@@ -46,6 +46,9 @@ class Vendor(SoftDeleteModel):
         ordering = ["-created_at"]
 
     def recalculate_balances(self):
+        # Refresh to prevent stale instances on related objects from double-counting advances
+        if self.pk:
+            self.refresh_from_db(fields=['advance_balance', 'opening_payable'])
         from decimal import Decimal
         sum_balance = sum((inv.balance_due for inv in self.invoices.filter(is_deleted=False, status='Saved')), Decimal('0.00'))
         opening = Decimal(str(self.opening_payable or '0.00'))

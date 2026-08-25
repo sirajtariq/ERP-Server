@@ -10,12 +10,12 @@ def get_or_create_customer_from_data(data: dict) -> Customer:
     customer_name = (data.get('customer_name') or '').strip()
     if not customer_name:
         customer_name = "General"
-    phone = (data.get('phone') or '').strip()
+    phone = (data.get('Phone') or data.get('phone') or '').strip()
     customer_type = data.get('customer_type')
     tax_number = data.get('tax_number') or None
 
     if not phone:
-        raise serializers.ValidationError("customer_data.phone is required.")
+        raise serializers.ValidationError("customer_data.Phone is required.")
         
     existing = Customer.all_objects.filter(phone=phone).first()
     if existing:
