@@ -132,6 +132,19 @@ class AttendanceSerializer(serializers.ModelSerializer):
     empId = serializers.CharField(source="employee.emp_no", read_only=True)
     employeeName = serializers.CharField(source="employee.name", read_only=True)
     createdAt = serializers.DateTimeField(source="created_at", read_only=True)
+    
+    status = serializers.ChoiceField(
+        choices=['present', 'absent', 'half_day', 'leave', 'weekly_off'],
+        required=True
+    )
+    subType = serializers.ChoiceField(
+        choices=['paid', 'unpaid'],
+        allow_null=True,
+        allow_blank=True,
+        required=False,
+        default=None,
+        write_only=True
+    )
 
     class Meta:
         model = Attendance
@@ -143,9 +156,57 @@ class AttendanceSerializer(serializers.ModelSerializer):
             "employeeName",
             "date",
             "status",
+            "subType",
             "remarks",
             "createdAt",
         ]
+
+    def validate(self, attrs):
+        # Handle the status and subType mapping before hitting the model
+        front_status = attrs.get('status')
+        sub_type = attrs.get('subType')
+        
+        # If this is a partial update, status might not be in attrs
+        if front_status:
+            if front_status in ['half_day', 'leave']:
+                if sub_type not in ['paid', 'unpaid']:
+                    raise serializers.ValidationError({"subType": f"subType ('paid' or 'unpaid') is required when status is '{front_status}'."})
+            
+            mapped_status = front_status
+            if front_status == "half_day":
+                mapped_status = "half_paid" if sub_type == "paid" else "half_unpaid"
+            elif front_status == "leave":
+                mapped_status = "leave_paid" if sub_type == "paid" else "leave_unpaid"
+            
+            attrs['status'] = mapped_status
+            
+        if 'subType' in attrs:
+            attrs.pop('subType')
+            
+        return attrs
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        st = instance.status
+        mapped_status = st
+        sub_type = None
+        
+        if st == "half_paid":
+            mapped_status = "half_day"
+            sub_type = "paid"
+        elif st == "half_unpaid":
+            mapped_status = "half_day"
+            sub_type = "unpaid"
+        elif st == "leave_paid":
+            mapped_status = "leave"
+            sub_type = "paid"
+        elif st == "leave_unpaid":
+            mapped_status = "leave"
+            sub_type = "unpaid"
+            
+        data['status'] = mapped_status
+        data['subType'] = sub_type
+        return data
 
 
 class BulkAttendanceItemSerializer(serializers.Serializer):

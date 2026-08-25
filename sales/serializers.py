@@ -257,14 +257,14 @@ class CustomerDataField(serializers.Field):
         customer_name = (data.get('customer_name') or '').strip()
         if not customer_name:
             customer_name = "General"
-        phone = (data.get('phone') or '').strip()
+        phone = (data.get('Phone') or data.get('phone') or '').strip()
         customer_type = data.get('customer_type')
         tax_number = data.get('tax_number') or None
 
         # if not customer_name:
         #     raise serializers.ValidationError("customer_data.customer_name is required.")
         if not phone:
-            raise serializers.ValidationError("customer_data.phone is required.")
+            raise serializers.ValidationError("customer_data.Phone is required.")
             
         existing = Customer.all_objects.filter(phone=phone).first()
         if existing:
@@ -450,8 +450,8 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
         # So base_amount should be subtotal - total_line_discount. This is correct for the serializer manually computing it.
         base_amount = subtotal - total_line_discount
         deducted_invoice_discount = base_amount * (invoice_discount / Decimal('100'))
-        tax_amount = (base_amount - deducted_invoice_discount) * (vat_percentage / Decimal('100'))
-        net_total = (base_amount - deducted_invoice_discount) + tax_amount
+        tax_amount = round((base_amount - deducted_invoice_discount) * (vat_percentage / Decimal('100')), 2)
+        net_total = round((base_amount - deducted_invoice_discount) + tax_amount, 2)
 
         paid_amount = Decimal(str(attrs.get('paid_amount', self.instance.paid_amount if self.instance else 0)))
 
@@ -637,6 +637,12 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
                     customer = customer_data
                 instance.customer = customer
 
+            target_status = validated_data.get('status', instance.status)
+            is_transitioning_to_saved = (old_status != 'Saved' and target_status == 'Saved')
+
+            if is_transitioning_to_saved:
+                validated_data['status'] = 'Draft'
+
             for attr, value in validated_data.items():
                 setattr(instance, attr, value)
             instance.save()
@@ -644,16 +650,23 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             if (instance.paid_amount > 0 or instance.advance_applied > 0) and instance.status == 'Draft':
                 instance.status = 'Saved'
                 instance.save(update_fields=['status'])
+                # If it auto-transitioned, we should mark it as such
+                is_transitioning_to_saved = True
 
             if items_data is not None:
                 instance.items.all().delete()
                 for item_data in items_data:
                     SalesItem.objects.create(invoice=instance, **item_data)
 
-            if old_status != 'Saved' and instance.status == 'Saved':
+            if is_transitioning_to_saved:
                 instance.refresh_from_db()
                 original_paid_amount = instance.paid_amount
                 self._apply_invoice_balance_effects(instance, original_paid_amount)
+                
+                # Now finally save the status as Saved
+                instance.status = 'Saved'
+                instance.save(update_fields=['status'])
+
                 from inventory.services import process_sales_invoice_stock
                 process_sales_invoice_stock(instance)
             elif instance.status == 'Saved':
