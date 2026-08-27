@@ -586,7 +586,7 @@ def record_salary_payment(employee: Employee, payload: dict) -> EmployeeSalary:
         )
         
         if surplus_amount > Decimal('0.00'):
-            SalaryAdvance.objects.create(
+            adv_obj = SalaryAdvance.objects.create(
                 employee=employee,
                 amount=surplus_amount,
                 date=payment_date,
@@ -596,6 +596,21 @@ def record_salary_payment(employee: Employee, payload: dict) -> EmployeeSalary:
             )
             salary_obj._surplus_amount = surplus_amount
             salary_obj._salary_portion = salary_portion
+
+            try:
+                from purchase.services import record_auto_expense
+                record_auto_expense(
+                    amount=adv_obj.amount,
+                    date=adv_obj.date,
+                    category="Salary Advance",
+                    description=f"Salary Advance (Overpayment): {employee.name} ({employee.emp_no}) - {adv_obj.reason}",
+                    payment_method=adv_obj.payment_method,
+                    paid_by=paid_by,
+                    reference_type="salary_advance",
+                    reference_id=adv_obj.id,
+                )
+            except Exception:
+                pass
 
         try:
             from purchase.services import record_auto_expense
@@ -677,6 +692,22 @@ def issue_salary_advance(employee: Employee, payload: dict) -> SalaryAdvance:
         reason=reason,
         status="pending",
     )
+    
+    try:
+        from purchase.services import record_auto_expense
+        record_auto_expense(
+            amount=advance.amount,
+            date=advance.date,
+            category="Salary Advance",
+            description=f"Salary Advance: {employee.name} ({employee.emp_no}) - {advance.reason}",
+            payment_method=advance.payment_method,
+            paid_by="Finance Manager",
+            reference_type="salary_advance",
+            reference_id=advance.id,
+        )
+    except Exception:
+        pass
+        
     return advance
 
 
