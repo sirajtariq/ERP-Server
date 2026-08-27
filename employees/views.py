@@ -287,7 +287,17 @@ class EmployeeViewSet(viewsets.ModelViewSet):
         employee = self.get_object()
         try:
             salary_instance = services.record_salary_payment(employee, request.data)
-            return Response(EmployeeSalarySerializer(salary_instance).data, status=status.HTTP_200_OK)
+            response_data = EmployeeSalarySerializer(salary_instance).data
+            
+            if hasattr(salary_instance, "_surplus_amount") and salary_instance._surplus_amount > 0:
+                import calendar
+                month_name = calendar.month_name[salary_instance.month]
+                response_data["_success_message"] = (
+                    f"Salary of {salary_instance._salary_portion} fully paid. "
+                    f"Excess {salary_instance._surplus_amount} automatically added to Employee Advance balance."
+                )
+                
+            return Response(response_data, status=status.HTTP_200_OK)
         except Exception as e:
             return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 

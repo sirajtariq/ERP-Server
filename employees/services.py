@@ -202,6 +202,134 @@ def calculate_employee_advance_balance(employee: Employee) -> Decimal:
     return _quantize_decimal(balance)
 
 
+def calculate_payable_days_for_month(employee: Employee, month: int, year: int, up_to_date: datetime.date = None) -> Decimal:
+    """
+    Computes total payable days on a week-by-week basis.
+    A weekly off is credited ONLY if all working days in that week (up to 'up_to_date') are marked.
+    """
+    configured_off_days = get_configured_weekly_off_days()
+    weeks = calendar.monthcalendar(year, month)
+    
+    joining_date = employee.joining_date
+    
+    total_payable_days = Decimal("0.0")
+    explicit_paid_days = Decimal("0.0")
+    
+    attendance_records = Attendance.objects.filter(
+        employee=employee,
+        date__year=year,
+        date__month=month
+    )
+    att_dict = {a.date.day: a.status for a in attendance_records}
+    
+    for week in weeks:
+        week_payable = Decimal("0.0")
+        has_unmarked = False
+        week_offs_count = 0
+        week_working_days = 0
+        
+        for day in week:
+            if day == 0:
+                continue
+                
+            d = datetime.date(year, month, day)
+            if up_to_date and d > up_to_date:
+                continue
+                
+            if joining_date and d < joining_date:
+                continue
+                
+            is_weekly_off = d.weekday() in configured_off_days
+            status = att_dict.get(day)
+            
+            if is_weekly_off:
+                week_offs_count += 1
+                if status in ['present', 'leave_paid', 'paid_leave', 'half_paid', 'holiday']:
+                    week_payable += Decimal("1.0")
+                    explicit_paid_days += Decimal("1.0")
+                    week_offs_count -= 1
+                elif status in ['half_unpaid', 'half_day']:
+                    week_payable += Decimal("0.5")
+                    explicit_paid_days += Decimal("0.5")
+                    week_offs_count -= 1
+            else:
+                week_working_days += 1
+                if not status or status == 'not_marked':
+                    has_unmarked = True
+                else:
+                    if status in ['present', 'leave_paid', 'paid_leave', 'half_paid', 'holiday']:
+                        week_payable += Decimal("1.0")
+                        explicit_paid_days += Decimal("1.0")
+                    elif status in ['half_unpaid', 'half_day']:
+                        week_payable += Decimal("0.5")
+                        explicit_paid_days += Decimal("0.5")
+                        
+        if has_unmarked:
+            credited_weekly_offs = 0
+        else:
+            credited_weekly_offs = week_offs_count
+                
+        week_payable += Decimal(credited_weekly_offs)
+        total_payable_days += week_payable
+        
+    if explicit_paid_days == Decimal("0.0"):
+        return Decimal("0.00")
+        
+    return total_payable_days
+
+
+def get_salary_divisor(month: int, year: int) -> Decimal:
+    """Returns the Decimal divisor for salary calculation based on settings."""
+    try:
+        from erp_backend.models import BusinessSettings
+        biz = BusinessSettings.get_solo()
+        basis = getattr(biz, 'salary_calculation_basis', 'working_days')
+        standard_working_days = getattr(biz, 'standard_working_days', None) or 26
+    except Exception:
+        basis = 'working_days'
+        standard_working_days = 26
+
+    if basis == "fixed_30":
+        return Decimal("30.0")
+    elif basis == "working_days":
+        return Decimal(str(standard_working_days))
+    else:
+        return Decimal(str(calendar.monthrange(year, month)[1]))
+
+
+def calculate_payroll_for_month(employee: Employee, month: int, year: int, up_to_date: datetime.date = None) -> dict:
+    """Enterprise LOP Deduction calculation logic."""
+    total_calendar_days = Decimal(calendar.monthrange(year, month)[1])
+    base_salary = Decimal(str(employee.current_salary or employee.base_salary or 0))
+    
+    divisor = get_salary_divisor(month, year)
+    payable_days = calculate_payable_days_for_month(employee, month, year, up_to_date=up_to_date)
+    
+    effective_total_days = Decimal(up_to_date.day) if up_to_date else total_calendar_days
+    unpaid_days = max(Decimal('0.0'), effective_total_days - payable_days)
+    
+    if unpaid_days <= Decimal('0.0'):
+        attendance_deduction = Decimal('0.00')
+        if not up_to_date:
+            earned_basic = base_salary
+        else:
+            earned_basic = min(base_salary, _quantize_decimal(payable_days * (base_salary / divisor)))
+    elif payable_days <= Decimal('0.0'):
+        attendance_deduction = base_salary
+        earned_basic = Decimal('0.00')
+    else:
+        exact_daily_rate = base_salary / divisor
+        attendance_deduction = _quantize_decimal(unpaid_days * exact_daily_rate)
+        earned_basic = max(Decimal('0.00'), base_salary - attendance_deduction)
+
+    return {
+        "payable_days": payable_days,
+        "unpaid_days": unpaid_days,
+        "attendance_deduction": attendance_deduction,
+        "earned_basic": earned_basic
+    }
+
+
 def calculate_month_attendance_summary(employee: Employee, month: int, year: int) -> dict:
     """
     Analyzes attendance records for an employee for the given month and year:
@@ -242,23 +370,16 @@ def calculate_month_attendance_summary(employee: Employee, month: int, year: int
     )
     not_marked_days = max(0, working_days - marked_days)
 
-    calc_basis = get_configured_salary_calculation_basis()
-    if calc_basis == "fixed_30":
-        divisor = Decimal("30")
-    elif calc_basis == "month_days":
-        divisor = Decimal(str(month_days))
-    else:
-        divisor = Decimal(str(working_days)) if working_days > 0 else Decimal("30")
-
-    if divisor > Decimal("0.00"):
-        per_day_rate = (employee.current_salary / divisor).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-    else:
-        per_day_rate = Decimal("0.00")
-
-    absent_deduction = (Decimal(absent_days) * per_day_rate).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-    half_unpaid_deduction = (Decimal(half_unpaid_days) * (per_day_rate / Decimal("2"))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-    leave_unpaid_deduction = (Decimal(leave_unpaid_days) * per_day_rate).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-    attendance_deduction = _quantize_decimal(absent_deduction + half_unpaid_deduction + leave_unpaid_deduction)
+    payroll_data = calculate_payroll_for_month(employee, month, year)
+    attendance_deduction = payroll_data["attendance_deduction"]
+    earned_basic = payroll_data["earned_basic"]
+    
+    # We maintain these for API backwards compatibility, but map them to the unified deduction.
+    absent_deduction = attendance_deduction
+    half_unpaid_deduction = Decimal("0.00")
+    leave_unpaid_deduction = Decimal("0.00")
+    
+    per_day_rate = _quantize_decimal(employee.current_salary / get_salary_divisor(month, year))
 
     return {
         "monthDays": month_days,
@@ -283,6 +404,7 @@ def calculate_month_attendance_summary(employee: Employee, month: int, year: int
         "halfUnpaidDeduction": half_unpaid_deduction,
         "leaveUnpaidDeduction": leave_unpaid_deduction,
         "attendanceDeduction": attendance_deduction,
+        "earnedBasic": earned_basic,
     }
 
 
@@ -300,29 +422,30 @@ def process_fifo_advance_recovery(employee: Employee, deduction_amount: Decimal)
     advances = SalaryAdvance.objects.filter(
         employee=employee,
         status__in=["pending", "partial"]
-    ).select_for_update().order_by("date", "id")
+    ).select_for_update().order_by("created_at")
 
-    remaining_to_deduct = deduction_amount
+    adv_deduction = deduction_amount
 
     for adv in advances:
-        unrecovered = adv.amount - adv.recovered_amount
-        if unrecovered <= Decimal("0.00"):
+        remaining_unpaid = adv.amount - (adv.recovered_amount or Decimal("0.00"))
+        if remaining_unpaid <= Decimal("0.00"):
             adv.status = "recovered"
             adv.save()
             continue
 
-        if remaining_to_deduct >= unrecovered:
+        if adv_deduction >= remaining_unpaid:
+            adv_deduction -= remaining_unpaid
             adv.recovered_amount = adv.amount
             adv.status = "recovered"
-            remaining_to_deduct -= unrecovered
+            adv.save()
         else:
-            adv.recovered_amount = _quantize_decimal(adv.recovered_amount + remaining_to_deduct)
+            adv.recovered_amount = (adv.recovered_amount or Decimal("0.00")) + adv_deduction
             adv.status = "partial"
-            remaining_to_deduct = Decimal("0.00")
+            adv.save()
+            adv_deduction = Decimal("0.00")
+            break
 
-        adv.save()
-
-        if remaining_to_deduct <= Decimal("0.00"):
+        if adv_deduction <= Decimal("0.00"):
             break
 
 
@@ -338,6 +461,30 @@ def record_salary_payment(employee: Employee, payload: dict) -> EmployeeSalary:
     month = int(payload.get("month"))
     year = int(payload.get("year"))
 
+    today = timezone.now().date()
+    import calendar
+    import datetime
+    last_day_of_target_month = calendar.monthrange(year, month)[1]
+    target_month_end_date = datetime.date(year, month, last_day_of_target_month)
+
+    if today < target_month_end_date:
+        raise ValueError(
+            f"Salary for {calendar.month_name[month]} {year} cannot be processed before month-end ({target_month_end_date}). "
+            "If you wish to pay early, please issue an Advance instead."
+        )
+
+    payroll_data = calculate_payroll_for_month(employee, month, year)
+    earned_basic_val = payroll_data.get("earned_basic", Decimal('0.00'))
+    payable_days_val = payroll_data.get("payable_days", Decimal('0.0'))
+
+    # Guard: If no attendance is marked or 0 days worked
+    if payable_days_val <= Decimal('0.0') or earned_basic_val <= Decimal('0.00'):
+        raise ValueError(
+            f"Cannot create or pay salary for {calendar.month_name[month]} {year}: "
+            "Employee has 0 marked working days (0.00 earned salary). "
+            "Please mark attendance first, or issue an Advance if paying early."
+        )
+
     att_summary = calculate_month_attendance_summary(employee, month, year)
     month_days = att_summary["monthDays"]
     working_days = int(payload.get("workingDays", att_summary["workingDays"]))
@@ -352,13 +499,13 @@ def record_salary_payment(employee: Employee, payload: dict) -> EmployeeSalary:
 
     if "attendanceDeduction" in payload and payload["attendanceDeduction"] is not None:
         attendance_deduction = _quantize_decimal(Decimal(str(payload["attendanceDeduction"])))
+        earned_basic = max(Decimal("0.00"), _quantize_decimal(employee.current_salary - attendance_deduction))
     else:
         attendance_deduction = att_summary["attendanceDeduction"]
+        earned_basic = att_summary.get("earnedBasic", max(Decimal("0.00"), _quantize_decimal(employee.current_salary - attendance_deduction)))
 
     # Calculate net salary
-    gross_earnings = employee.current_salary + bonus
-    total_deductions = attendance_deduction + deductions + advance_deduction
-    net_salary = _quantize_decimal(gross_earnings - total_deductions)
+    net_salary = max(Decimal("0.00"), _quantize_decimal(earned_basic + bonus - deductions - advance_deduction))
 
     slip_no = payload.get("slipNo")
     if not slip_no:
@@ -402,8 +549,8 @@ def record_salary_payment(employee: Employee, payload: dict) -> EmployeeSalary:
         salary_obj.net_salary = net_salary
         salary_obj.save()
 
-    # Process FIFO advance recovery if advance_deduction > 0
-    if advance_deduction > Decimal("0.00"):
+    # Process FIFO advance recovery if advance_deduction > 0 on salary creation
+    if created and advance_deduction > Decimal("0.00"):
         process_fifo_advance_recovery(employee, advance_deduction)
 
     # Process Payment Installment if amount provided
@@ -411,15 +558,18 @@ def record_salary_payment(employee: Employee, payload: dict) -> EmployeeSalary:
     
     if payment_amount > Decimal("0.00"):
         # Ensure a salary cannot be paid more than its balance_remaining
-        current_balance = get_salary_balance_remaining(salary_obj)
+        current_balance = get_salary_balance_remaining(salary_obj).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        payment_amount = payment_amount.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
         
-        if current_balance <= Decimal("0.00") or salary_obj.status == 'paid':
-            from rest_framework.exceptions import ValidationError
-            raise ValidationError({"detail": "This salary is already fully paid. No further payments allowed."})
+        if not created and (current_balance <= Decimal("0.00") or salary_obj.status == 'paid'):
+            raise ValueError("This salary is already fully paid. No further payments allowed.")
             
         if payment_amount > current_balance:
-            from rest_framework.exceptions import ValidationError
-            raise ValidationError({"detail": f"Payment amount ({payment_amount}) exceeds remaining balance ({current_balance})."})
+            salary_portion = current_balance
+            surplus_amount = payment_amount - current_balance
+        else:
+            salary_portion = payment_amount
+            surplus_amount = Decimal('0.00')
 
         payment_date = payload.get("paymentDate") or timezone.now().date()
         payment_method = payload.get("paymentMethod", "Cash")
@@ -429,11 +579,24 @@ def record_salary_payment(employee: Employee, payload: dict) -> EmployeeSalary:
         payment_obj = SalaryPayment.objects.create(
             salary=salary_obj,
             payment_date=payment_date,
-            amount=payment_amount,
+            amount=salary_portion,
             payment_method=payment_method,
             paid_by=paid_by,
             remarks=remarks,
         )
+        
+        if surplus_amount > Decimal('0.00'):
+            SalaryAdvance.objects.create(
+                employee=employee,
+                amount=surplus_amount,
+                date=payment_date,
+                payment_method=payment_method,
+                reason=f"Excess salary payment from {calendar.month_name[month]} {year}",
+                status='pending'
+            )
+            salary_obj._surplus_amount = surplus_amount
+            salary_obj._salary_portion = salary_portion
+
         try:
             from purchase.services import record_auto_expense
             record_auto_expense(
@@ -633,19 +796,22 @@ def generate_payslip_data(salary: EmployeeSalary) -> dict:
     # 4. Dynamic Attendance & Deduction Audit
     year = salary.year
     month = salary.month
-    month_days = calendar.monthrange(year, month)[1]
     
-    weekly_offs = 0
-    for day in range(1, month_days + 1):
-        if datetime.date(year, month, day).weekday() in [5, 6]:
-            weekly_offs += 1
-
-    records = Attendance.objects.filter(employee_id=employee.id, date__year=year, date__month=month)
-    present_days = records.filter(status__in=['present', 'leave', 'holiday', 'leave_paid', 'leave_unpaid', 'paid_leave', 'unpaid_leave']).count()
-    absent_days = records.filter(status__in=['absent']).count()
-    half_days = records.filter(status__in=['half_day', 'half_paid', 'half_unpaid']).count()
+    att_summary = calculate_month_attendance_summary(employee, month, year)
+    month_days = att_summary["monthDays"]
+    weekly_offs = att_summary["weeklyOffs"]
+    present_days = att_summary["presentDays"]
+    half_days = att_summary.get("halfDays", 0)
     
-    working_days = float(salary.working_days or (present_days + half_days * 0.5))
+    if salary.working_days is not None:
+        working_days = float(salary.working_days)
+    else:
+        working_days = float(att_summary.get("payable_days", calculate_payroll_for_month(employee, month, year)["payable_days"]))
+        
+    if salary.absent_days is not None:
+        absent_days = float(salary.absent_days)
+    else:
+        absent_days = float(att_summary["absentDays"])
 
     # 1. Stored Record Snapshot Mapping
     saved_base_salary = float(getattr(salary, 'current_salary', None) or getattr(salary, 'basic_salary', 0) or getattr(employee, 'current_salary', 0) or 0)
@@ -852,41 +1018,26 @@ def get_employee_360_overview(employee: Employee) -> dict:
     total_paid = sum((s.amount_paid for s in all_salaries), Decimal("0.00"))
     pending_balance = max(Decimal("0.00"), total_earned - total_paid)
 
-    import calendar
-    now = timezone.now()
-    
-    total_days_in_month = 0
-    try:
-        from erp_backend.models import BusinessSettings
-        biz = BusinessSettings.get_solo()
-        basis = getattr(biz, 'salary_calculation_basis', 'month_days')
+    advance_balance = calculate_employee_advance_balance(employee)
 
-        if basis == 'fixed_30':
-            total_days_in_month = 30
-        elif basis == 'working_days':
-            total_days_in_month = getattr(biz, 'standard_working_days', None) or 26
-        elif basis == 'month_days':
-            total_days_in_month = calendar.monthrange(now.year, now.month)[1]
-        else:
-            total_days_in_month = calendar.monthrange(now.year, now.month)[1]
-    except Exception:
-        total_days_in_month = calendar.monthrange(now.year, now.month)[1]
+    total_pending_salaries = sum(
+        (get_salary_balance_remaining(s) for s in all_salaries if s.status in ['pending', 'partial']),
+        Decimal("0.00")
+    )
 
-    daily_rate = Decimal(employee.current_salary or 0) / Decimal(total_days_in_month)
+    salary_generated = EmployeeSalary.objects.filter(
+        employee=employee, month=now.month, year=now.year
+    ).exists()
     
-    present_days = Attendance.objects.filter(
-        employee=employee, date__year=now.year, date__month=now.month,
-        status__in=['present', 'weekly_off', 'leave_paid', 'leave_unpaid']
-    ).count()
-    
-    half_days = Attendance.objects.filter(
-        employee=employee, date__year=now.year, date__month=now.month,
-        status__in=['half_paid', 'half_unpaid']
-    ).count()
-    
-    payable_days = Decimal(present_days) + (Decimal(half_days) * Decimal('0.5'))
-    current_month_accrued = round(payable_days * daily_rate, 2)
-    net_settlement_amount = pending_balance + current_month_accrued
+    if salary_generated:
+        payable_days = Decimal('0.00')
+        current_month_accrued = Decimal('0.00')
+    else:
+        payroll_data = calculate_payroll_for_month(employee, now.month, now.year, up_to_date=now.date())
+        payable_days = payroll_data["payable_days"]
+        current_month_accrued = payroll_data["earned_basic"]
+        
+    net_settlement_amount = total_pending_salaries + current_month_accrued - advance_balance
 
     return {
         "header": {
@@ -900,7 +1051,7 @@ def get_employee_360_overview(employee: Employee) -> dict:
         "topMetrics": {
             "currentSalary": _quantize_decimal(employee.current_salary),
             "pendingSalary": _quantize_decimal(pending_salary_amount),
-            "advanceBalance": advance_balance,
+            "advanceBalance": float(advance_balance),
             "salaryRecordsCount": salary_records_count,
             "noOfIncrements": no_of_increments,
         },
@@ -932,6 +1083,7 @@ def get_employee_360_overview(employee: Employee) -> dict:
             "currentMonthDaysWorked": float(payable_days),
             "currentMonthAccrued": float(current_month_accrued),
             "netSettlementAmount": float(net_settlement_amount),
+            "suggestedAdvanceDeduction": float(advance_balance),
         },
     }
 
@@ -963,42 +1115,27 @@ def get_employee_salaries_tab_summary(employee: Employee) -> dict:
             partial_pending_count += 1
             
     pending_balance = max(Decimal("0.00"), total_earned - total_paid)
-
-    import calendar
     now = timezone.now()
-    
-    total_days_in_month = 0
-    try:
-        from erp_backend.models import BusinessSettings
-        biz = BusinessSettings.get_solo()
-        basis = getattr(biz, 'salary_calculation_basis', 'month_days')
+    advance_balance = calculate_employee_advance_balance(employee)
 
-        if basis == 'fixed_30':
-            total_days_in_month = 30
-        elif basis == 'working_days':
-            total_days_in_month = getattr(biz, 'standard_working_days', None) or 26
-        elif basis == 'month_days':
-            total_days_in_month = calendar.monthrange(now.year, now.month)[1]
-        else:
-            total_days_in_month = calendar.monthrange(now.year, now.month)[1]
-    except Exception:
-        total_days_in_month = calendar.monthrange(now.year, now.month)[1]
+    total_pending_salaries = sum(
+        (get_salary_balance_remaining(s) for s in salaries if s.status in ['pending', 'partial']),
+        Decimal("0.00")
+    )
 
-    daily_rate = Decimal(employee.current_salary or 0) / Decimal(total_days_in_month)
+    salary_generated = EmployeeSalary.objects.filter(
+        employee=employee, month=now.month, year=now.year
+    ).exists()
     
-    present_days = Attendance.objects.filter(
-        employee=employee, date__year=now.year, date__month=now.month,
-        status__in=['present', 'weekly_off', 'leave_paid', 'leave_unpaid']
-    ).count()
-    
-    half_days = Attendance.objects.filter(
-        employee=employee, date__year=now.year, date__month=now.month,
-        status__in=['half_paid', 'half_unpaid']
-    ).count()
-    
-    payable_days = Decimal(present_days) + (Decimal(half_days) * Decimal('0.5'))
-    current_month_accrued = round(payable_days * daily_rate, 2)
-    net_settlement_amount = pending_balance + current_month_accrued
+    if salary_generated:
+        payable_days = Decimal('0.00')
+        current_month_accrued = Decimal('0.00')
+    else:
+        payroll_data = calculate_payroll_for_month(employee, now.month, now.year, up_to_date=now.date())
+        payable_days = payroll_data["payable_days"]
+        current_month_accrued = payroll_data["earned_basic"]
+        
+    net_settlement_amount = total_pending_salaries + current_month_accrued - advance_balance
 
     return {
         "totalPaid": _quantize_decimal(total_paid),
@@ -1011,6 +1148,8 @@ def get_employee_salaries_tab_summary(employee: Employee) -> dict:
         "currentMonthDaysWorked": float(payable_days),
         "currentMonthAccrued": float(current_month_accrued),
         "netSettlementAmount": float(net_settlement_amount),
+        "advanceBalance": float(advance_balance),
+        "suggestedAdvanceDeduction": float(advance_balance),
     }
 
 
