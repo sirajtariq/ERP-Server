@@ -469,17 +469,11 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
 
             # Case 1: Coverage is less than bill total -> Must be Credit
             if effective_coverage < net_total and payment_term == 'Cash':
-                raise serializers.ValidationError(
-                    {"payment_term": f"Remaining balance detected after applying available advance ({advance_balance:.2f}). "
-                                     f"Payment term must be 'Credit' for partial or unpaid balances."}
-                )
+                attrs['payment_term'] = 'Credit'
 
             # Case 2: Coverage clears or exceeds the bill -> Must be Cash
             if effective_coverage >= net_total and payment_term == 'Credit':
-                raise serializers.ValidationError(
-                    {"payment_term": f"Invoice is fully covered by the paid amount and available advance ({advance_balance:.2f}). "
-                                     f"Payment term must be 'Cash' as no new debt is created."}
-                )
+                attrs['payment_term'] = 'Cash'
 
         # 7. Stock availability pre-validation if saving or transitioning to 'Saved'
         target_status = attrs.get('status') or attrs.get('invoiceStatus')

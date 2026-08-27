@@ -1007,7 +1007,7 @@ class QuotationViewSet(viewsets.ModelViewSet):
                 # Explicit Mappings:
                 invoice_discount=quotation.discount_percentage,
                 vat_percentage=quotation.vat_percentage,
-                status='Saved'  # Saved status to trigger stock and accounting
+                status='Draft'  # Draft status so user can review before finalizing
             )
             
             for q_item in quotation.items.all():
@@ -1022,12 +1022,9 @@ class QuotationViewSet(viewsets.ModelViewSet):
                     discount=q_item.discount
                 )
                 
-            from decimal import Decimal
             from sales.serializers import QuotationDetailSerializer, SalesInvoiceSerializer
             
             invoice.refresh_from_db()
-            SalesInvoiceSerializer()._apply_invoice_balance_effects(invoice, Decimal('0.00'))
-            process_sales_invoice_stock(invoice)
                 
             quotation.status = 'converted'
             quotation.converted_invoice = invoice
